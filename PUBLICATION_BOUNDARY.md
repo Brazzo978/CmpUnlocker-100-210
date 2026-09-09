@@ -12,14 +12,15 @@ Allowed categories:
 - read-only state collectors;
 - compute benchmarks;
 - evidence checksums.
+- reviewed source and scripts required by the supported Tensor/Gen2 release;
+- exact-firmware builders that distribute no proprietary firmware blob;
+- bounded, fail-closed installers and oneshot units.
 
 Forbidden categories:
 
-- firmware, ROM, microcode, kernel modules or other binary payloads;
-- code that writes PCI configuration space, MMIO/BAR registers or firmware;
-- code that hooks, patches or changes a driver function or return value;
-- driver unbind/rebind, module loading or service automation;
-- exact proprietary write recipes;
+- prebuilt firmware, ROM, microcode, kernel modules or other payload binaries;
+- experimental write/retrain tools outside the reviewed Tensor/Gen2 path;
+- Gen3 driver hooks, private-symbol offsets and unpublished bypass chains;
 - private infrastructure identifiers, credentials or access instructions;
 - files copied wholesale from the private repository without a fresh review.
 
@@ -31,6 +32,8 @@ Before every public push:
 4. inspect every newly tracked file individually;
 5. confirm that the commit contains no generated archive or binary other than
    the approved benchmark image;
-6. push only after all checks pass.
+6. confirm that operational changes remain limited to the documented
+   Tensor/Gen2 scope and retain all fail-closed checks;
+7. push only after all checks pass.
 
 Never use `git add .` in this repository. Stage explicit paths.

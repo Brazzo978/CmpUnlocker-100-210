@@ -1,0 +1,14 @@
+[Unit]
+Description=Apply volatile Tensor unlock to CMP100 GV100 GPUs
+After=systemd-modules-load.service nvidia-persistenced.service
+Before=docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/cmp100-unlocker
+ExecStart=/usr/local/sbin/cmp100-tensor-unlock
+RemainAfterExit=yes
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

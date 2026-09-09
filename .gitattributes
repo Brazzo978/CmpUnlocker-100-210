@@ -1,0 +1,10 @@
+* text=auto
+*.c text eol=lf
+*.md text eol=lf
+*.py text eol=lf
+*.service text eol=lf
+*.sh text eol=lf
+Makefile text eol=lf
+install.sh text eol=lf
+install-pcie-guest.sh text eol=lf
+scripts/* text eol=lf

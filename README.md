@@ -1,19 +1,29 @@
-# NVIDIA CMP100-210 research results
+# NVIDIA CMP100-210 unlock and research
 
-Independent experimental results for NVIDIA CMP100-210 (`10de:1d84`, GV100),
-focused on Tensor throughput and PCI Express link behavior.
+Open-source experimental tooling and independently measured results for NVIDIA
+CMP100-210 (`10de:1d84`, GV100), focused on Tensor throughput and PCI Express
+link behavior.
 
-This repository publishes measurements, limitations and **read-only**
-verification tools. It intentionally does not contain the privileged firmware
-write primitive, payload-construction code, driver hooks, installation scripts
-or an operational unlock procedure. See [Disclosure boundary](DISCLOSURE.md).
+The supported procedures are volatile: they do not flash the VBIOS or program
+eFuses, and a reset or power cycle restores stock state. The repository now
+publishes the minimum operational implementation needed to reproduce the
+validated Tensor and PCIe Gen2 results. See [Disclosure boundary](DISCLOSURE.md).
+
+## Start here
+
+- [Debian 13: one-time Tensor unlock](docs/DEBIAN13-TENSOR-ONESHOT.md)
+- [Debian 13: one-time PCIe Gen2 unlock](docs/DEBIAN13-PCIE-GEN2-ONESHOT.md)
+
+Both guides default to a single manual application. They install systemd
+oneshot units but do not enable them at boot. Use the exact Debian 13,
+NVIDIA `550.163.01` and GV100 firmware baseline documented in the guides.
 
 ## Results
 
 | Area | Status | Tested result |
 | --- | --- | --- |
-| FP16 Tensor path | **Validated after a volatile research intervention** | Two CMP100-210 GPUs reached median results of 74.179 and 75.040 TFLOPS on an `8192 x 8192` FP16 GEMM |
-| PCIe Gen2 | **Validated on two cards** | Both endpoints negotiated Gen2 x1; pinned 32 MiB transfers were approximately 417/419 MB/s versus a 207/209 MB/s stock-control measurement |
+| FP16 Tensor path | **Working on the tested baseline** | Two CMP100-210 GPUs reached median results of 74.179 and 75.040 TFLOPS on an `8192 x 8192` FP16 GEMM |
+| PCIe Gen2 | **Working on two tested x1 paths** | Both endpoints negotiated Gen2 x1; pinned 32 MiB transfers were approximately 417/419 MB/s versus a 207/209 MB/s stock-control measurement |
 | PCIe Gen3 | **Not achieved** | Making the software policy request Gen3 was insufficient: the endpoint continued to expose a 5 GT/s maximum and rejected the 8 GT/s target before any observable equalization |
 | PCIe width | **Still open** | Both tested cards remained x1, including behind Gen3 x8- and Gen3 x16-capable upstream paths; no x16 result is claimed |
 
@@ -29,14 +39,26 @@ or power-cycling restored the stock state.
 - [Captured Tensor benchmark output](results/tensor-benchmark.txt)
 - [Evidence checksums](results/SHA256SUMS)
 
-The included tools cannot modify GPU firmware, PCI configuration space, BARs,
-drivers or services:
+Operational components:
+
+- `install.sh` builds and installs the Tensor oneshot helper;
+- `install-pcie-guest.sh` builds and installs the separate Gen2 helper;
+- `tools/build_payloads.py` derives tested artifacts from exact, locally
+  installed NVIDIA firmware; no NVIDIA firmware blob is distributed;
+- `src/gv100_nouveau_acr_hook.c` is the narrow kernel hook used for the tested
+  Nouveau ACR handoff;
+- `scripts/cmp100-tensor-unlock` and `scripts/cmp100-pcie-gen2` implement the
+  fail-closed, volatile operations;
+- the two systemd units provide bounded manual execution and optional boot
+  integration. The tutorials do not enable them automatically.
+
+Validation components:
 
 - `tools/benchmark_tensor.py` runs a CUDA FP16 GEMM benchmark.
 - `tools/collect_state.sh` prints standard system, NVIDIA and PCIe state to
   standard output.
-- `tools/check_public_boundary.py` enforces the publication allowlist and
-  rejects write-capable or binary artifacts.
+- `tools/check_public_boundary.py` enforces an exact public file allowlist and
+  rejects secrets, firmware blobs and unreviewed laboratory files.
 
 ## Tested environment
 
@@ -52,15 +74,21 @@ the common CMP link limit was not attributed to a server-wide Gen1/Gen2 cap.
 
 ## Safety and scope
 
-The repository does not enable an unlock. Do not interpret the published
-measurements as a guarantee that another board, firmware version or driver will
-behave identically. PCIe generation and link width are independent properties;
-the Gen2 result does not imply x16 support, and the negative Gen3 result does
-not prove the physical GV100 PHY incapable of 8 GT/s.
+This repository performs privileged, write-capable GPU operations and
+temporarily unbinds drivers. Use it only on CMP100-210 hardware you own and can
+reboot, with a recovery console available. Never bypass device, firmware,
+payload, module or BDF checks. A failed operation can wedge the GPU until a
+guest or host reboot.
 
-Please report security-sensitive findings privately as described in
-[SECURITY.md](SECURITY.md), rather than opening a public issue with operational
-firmware or privileged-write details.
+Do not interpret the tested results as a guarantee that another PCB revision,
+firmware version, kernel or driver will behave identically. PCIe generation
+and width are independent properties: the Gen2 result does not imply x16
+support, and the negative Gen3 result does not prove the physical GV100 PHY
+incapable of 8 GT/s.
+
+Please report new security-sensitive findings privately as described in
+[SECURITY.md](SECURITY.md). Do not attach NVIDIA firmware, VBIOS images,
+credentials or private infrastructure data to a public issue.
 
 ## License
 

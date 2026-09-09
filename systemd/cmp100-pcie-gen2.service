@@ -1,0 +1,15 @@
+[Unit]
+Description=Apply volatile physical Gen2 retrain to CMP100 GV100 GPUs
+After=systemd-modules-load.service cmp100-tensor-unlock.service nvidia-persistenced.service
+# Keep interactive monitors and container workloads out of the driver handoff.
+Before=unsloth-studio.service docker.service ssh.service sshd.service systemd-user-sessions.service getty.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/cmp100-pcie
+ExecStart=/usr/local/sbin/cmp100-pcie-gen2
+RemainAfterExit=yes
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

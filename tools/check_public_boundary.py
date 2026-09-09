@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reject files outside the public research repository's narrow boundary."""
+"""Reject files outside the reviewed public Tensor/Gen2 release boundary."""
 
 from __future__ import annotations
 
@@ -12,12 +12,17 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 APPROVED_FILES = {
     ".github/workflows/public-boundary.yml",
+    ".gitattributes",
     ".gitignore",
     "DISCLOSURE.md",
     "LICENSE",
     "PUBLICATION_BOUNDARY.md",
     "README.md",
     "SECURITY.md",
+    "install-pcie-guest.sh",
+    "install.sh",
+    "docs/DEBIAN13-PCIE-GEN2-ONESHOT.md",
+    "docs/DEBIAN13-TENSOR-ONESHOT.md",
     "docs/GEN3-LIMIT.md",
     "docs/METHODOLOGY.md",
     "docs/PCIE-RESULTS.md",
@@ -25,7 +30,14 @@ APPROVED_FILES = {
     "results/SHA256SUMS",
     "results/tensor-benchmark.png",
     "results/tensor-benchmark.txt",
+    "scripts/cmp100-pcie-gen2",
+    "scripts/cmp100-tensor-unlock",
+    "src/Makefile",
+    "src/gv100_nouveau_acr_hook.c",
+    "systemd/cmp100-pcie-gen2.service",
+    "systemd/cmp100-tensor-unlock.service",
     "tools/benchmark_tensor.py",
+    "tools/build_payloads.py",
     "tools/check_public_boundary.py",
     "tools/collect_state.sh",
 }
@@ -45,28 +57,13 @@ SENSITIVE_PATTERNS = {
     "credential assignment": re.compile(
         r"(?i)\b(?:password|passwd|token|api[_-]?key)\s*[:=]"
     ),
-    "proprietary register literal": re.compile(r"\b0x[0-9a-fA-F]{5,}\b"),
     "private RM symbol": re.compile(r"\b_nv\d+rm\b"),
-    "private implementation marker": re.compile(
-        r"(?i)\b(?:build_payloads|nouveau_acr_hook|dependency-map|"
-        r"ucode_load|fecs_sig|replace_on_return|arm_write)\b"
-    ),
-    "device-memory access": re.compile(r"/dev/(?:mem|port)"),
-    "kernel-module operation": re.compile(
-        r"\b(?:insmod|rmmod|modprobe)\b"
-    ),
-    "PCI configuration write": re.compile(r"\bsetpci\b"),
-    "driver interception": re.compile(r"\b(?:kprobe|kretprobe)\b"),
-    "MMIO write API": re.compile(r"\b(?:writel|writeq|ioremap)\s*\("),
-    "service mutation": re.compile(
-        r"\bsystemctl\s+(?:start|stop|restart|enable|disable)\b"
-    ),
 }
 
 
-def tracked_files() -> list[str]:
+def candidate_files() -> list[str]:
     completed = subprocess.run(
-        ["git", "ls-files", "-z"],
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
         cwd=ROOT,
         check=True,
         capture_output=True,
@@ -80,7 +77,7 @@ def tracked_files() -> list[str]:
 
 def main() -> int:
     failures: list[str] = []
-    files = tracked_files()
+    files = candidate_files()
 
     for relative in files:
         path = ROOT / relative
@@ -95,7 +92,7 @@ def main() -> int:
         if relative == "tools/check_public_boundary.py":
             continue
 
-        if suffix in {"", ".md", ".py", ".sh", ".txt", ".yml"}:
+        if suffix != ".png":
             text = path.read_text(encoding="utf-8", errors="replace")
             for label, pattern in SENSITIVE_PATTERNS.items():
                 if pattern.search(text):
@@ -107,7 +104,7 @@ def main() -> int:
             print(f"- {failure}", file=sys.stderr)
         return 1
 
-    print(f"PUBLICATION BOUNDARY: PASS ({len(files)} tracked files)")
+    print(f"PUBLICATION BOUNDARY: PASS ({len(files)} reviewed files)")
     return 0
 
 

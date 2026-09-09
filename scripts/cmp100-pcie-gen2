@@ -1,0 +1,486 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
+# Volatile, bounded guest-side Gen2 retrain for explicitly allow-listed CMP100s.
+set -Eeuo pipefail
+
+STATE_DIR=${CMP100_PCIE_STATE_DIR:-/var/lib/cmp100-pcie}
+LIB_DIR=${CMP100_PCIE_LIB_DIR:-/usr/lib/cmp100-pcie}
+MANIFEST=$STATE_DIR/manifest.env
+FW_FECS=/lib/firmware/nvidia/gv100/gr/fecs_sig.bin
+FW_BL=/lib/firmware/nvidia/gv100/acr/bl.bin
+FW_UCODE=/lib/firmware/nvidia/gv100/acr/ucode_load.bin
+STOCK_FECS=$STATE_DIR/stock/fecs_sig.bin
+STOCK_BL=$STATE_DIR/stock/bl.bin
+STOCK_UCODE=$STATE_DIR/stock/ucode_load.bin
+CUSTOM_FECS=$LIB_DIR/payloads/fecs_sig.candidate-c-504.bin
+CUSTOM_BL=$LIB_DIR/payloads/bl.load-candidate-c.bin
+PCIE_POLICY=$LIB_DIR/payloads/ucode_load.pcie-policy-88610-1.bin
+PCIE_VECTOR=$LIB_DIR/payloads/ucode_load.pcie-vector-8872c-6.bin
+HOOK=$LIB_DIR/gv100_nouveau_acr_hook.ko
+LOCK=/run/lock/cmp100-pcie.lock
+DEFAULTS=/etc/default/cmp100-pcie
+LOGDIR=/var/log/cmp100-pcie
+LOG=$LOGDIR/run-$(date -u +%Y%m%dT%H%M%SZ).log
+
+EXPECTED_POLICY_SHA=f5827fe768a62289fc8080877eb01eacb271b030dbf15c1b43e702f17dacf524
+EXPECTED_VECTOR_SHA=4c658410b734a022d603e766429b1779647850dbd04e9fde3963e378e024d4e2
+TARGETS=()
+STOPPED_SERVICES=()
+PERSISTENCED_WAS_ACTIVE=0
+INITIALLY_LOADED_MODULES=()
+BACKUP_DIR=
+ACTIVE_FECS=
+ACTIVE_BL=
+ACTIVE_UCODE=
+MUTATING=0
+SUCCESS=0
+
+mkdir -p "$LOGDIR"
+exec > >(tee -a "$LOG") 2>&1
+
+say() { printf '[%s] %s\n' "$(date -u +%FT%TZ)" "$*"; }
+die() { say "ERROR: $*"; exit 1; }
+sha_of() { sha256sum "$1" | awk '{print $1}'; }
+driver_of() {
+    local link
+    link=$(readlink "/sys/bus/pci/devices/$1/driver" 2>/dev/null || true)
+    printf '%s' "${link##*/}"
+}
+assert_root_regular() {
+    local path=$1 mode
+    [[ -f $path && ! -L $path ]] || die "not a regular file: $path"
+    mode=$(stat -c '%u:%a' -- "$path")
+    [[ ${mode%%:*} == 0 ]] || die "not root-owned: $path"
+    (( (8#${mode#*:} & 8#022) == 0 )) || die "file is group/world writable: $path"
+}
+assert_sha() {
+    local path=$1 expected=$2
+    assert_root_regular "$path"
+    [[ $(sha_of "$path") == "$expected" ]] || die "SHA mismatch: $path"
+}
+resolve_firmware() {
+    local path=$1 resolved
+    resolved=$(readlink -f -- "$path") || die "cannot resolve firmware path: $path"
+    [[ -f $resolved && ! -L $resolved ]] || die "firmware target is not a regular file: $path"
+    printf '%s\n' "$resolved"
+}
+copy_content() {
+    local source=$1 destination=$2
+    # Destination is the resolved target, so this preserves any distribution
+    # symlink at /lib/firmware and restores its content instead of replacing it.
+    dd if="$source" of="$destination" conv=fsync status=none
+}
+restore_stock() {
+    [[ -n $ACTIVE_FECS && -n $ACTIVE_BL && -n $ACTIVE_UCODE ]] || return 0
+    if [[ -n $BACKUP_DIR && -f $BACKUP_DIR/fecs_sig.bin ]]; then
+        copy_content "$BACKUP_DIR/fecs_sig.bin" "$ACTIVE_FECS"
+        copy_content "$BACKUP_DIR/bl.bin" "$ACTIVE_BL"
+        copy_content "$BACKUP_DIR/ucode_load.bin" "$ACTIVE_UCODE"
+    else
+        copy_content "$STOCK_FECS" "$ACTIVE_FECS"
+        copy_content "$STOCK_BL" "$ACTIVE_BL"
+        copy_content "$STOCK_UCODE" "$ACTIVE_UCODE"
+    fi
+}
+remove_hook() {
+    [[ -d /sys/module/gv100_nouveau_acr_hook ]] && rmmod gv100_nouveau_acr_hook || true
+}
+wait_driver() {
+    local bdf wanted attempt
+    bdf=$1
+    wanted=$2
+    for attempt in $(seq 1 50); do
+        [[ $(driver_of "$bdf") == "$wanted" ]] && return 0
+        sleep 0.1
+    done
+    return 1
+}
+wait_nvidia_bdf() {
+    local bdf short attempt inventory
+    bdf=$1
+    short=${bdf#0000:}
+    for attempt in $(seq 1 20); do
+        inventory=$(timeout 10 nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader 2>/dev/null || true)
+        grep -Fqi "$short" <<< "$inventory" && return 0
+        sleep 0.1
+    done
+    return 1
+}
+rebind_nvidia() {
+    local bdf devdir current
+    bdf=$1
+    devdir=/sys/bus/pci/devices/$bdf
+    current=$(driver_of "$bdf")
+    if [[ $current == nouveau ]]; then
+        printf 'test-hold' > "$devdir/driver_override" || true
+        printf '%s' "$bdf" > /sys/bus/pci/drivers/nouveau/unbind || true
+        current=$(driver_of "$bdf")
+    fi
+    if [[ -z $current ]]; then
+        printf 'nvidia' > "$devdir/driver_override" || true
+        printf '%s' "$bdf" > /sys/bus/pci/drivers/nvidia/bind || true
+    fi
+    wait_driver "$bdf" nvidia && wait_nvidia_bdf "$bdf"
+}
+restore_services() {
+    local unit
+    if (( PERSISTENCED_WAS_ACTIVE )); then
+        systemctl start --no-block nvidia-persistenced.service 2>/dev/null || true
+    fi
+    for unit in "${STOPPED_SERVICES[@]}"; do
+        # Do not make the oneshot wait for a workload that is ordered after it.
+        systemctl start --no-block "$unit" 2>/dev/null || true
+    done
+}
+cleanup() {
+    local rc=$? recovery_failed=0
+    trap - EXIT
+    set +e
+    if (( MUTATING )); then
+        restore_stock || recovery_failed=1
+        [[ $(sha_of "$ACTIVE_FECS") == "$STOCK_FECS_SHA" && $(sha_of "$ACTIVE_BL") == "$STOCK_BL_SHA" && $(sha_of "$ACTIVE_UCODE") == "$STOCK_UCODE_SHA" ]] || recovery_failed=1
+        remove_hook
+        [[ ! -d /sys/module/gv100_nouveau_acr_hook ]] || recovery_failed=1
+        local bdf
+        for bdf in "${TARGETS[@]}"; do
+            rebind_nvidia "$bdf" || recovery_failed=1
+        done
+    fi
+    local module
+    for module in "${INITIALLY_LOADED_MODULES[@]}"; do
+        modprobe "$module" 2>/dev/null || recovery_failed=1
+    done
+    restore_services
+    if (( recovery_failed )); then
+        say "RECOVERY INCOMPLETE: inspect drivers/firmware; backup retained at $BACKUP_DIR"
+        rc=1
+    else
+        [[ -z $BACKUP_DIR ]] || rm -rf -- "$BACKUP_DIR"
+    fi
+    if (( rc != 0 )); then
+        say "FAILED (rc=$rc, recovery_failed=$recovery_failed); inspect $LOG"
+    elif (( SUCCESS )); then
+        say "PASS; cleanup completed; log saved to $LOG"
+    fi
+    exit "$rc"
+}
+trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+
+mmio_read() { busybox devmem "$1" 32; }
+mmio_write() { busybox devmem "$1" 32 "$2" >/dev/null; }
+bar0_address() {
+    awk 'NR == 1 { print $1; exit }' "/sys/bus/pci/devices/$1/resource"
+}
+mmio_at() {
+    local bdf offset bar0
+    bdf=$1
+    offset=$2
+    bar0=$(bar0_address "$bdf")
+    printf '0x%x\n' "$((bar0 + offset))"
+}
+pcie_word() {
+    local bdf offset
+    bdf=$1
+    offset=$2
+    setpci -s "$bdf" "CAP_EXP+$offset.w"
+}
+pcie_cap_speed() {
+    local bdf raw
+    bdf=$1
+    raw=$(setpci -s "$bdf" CAP_EXP+0c.l)
+    printf '%d\n' "$((16#$raw & 0xf))"
+}
+parent_port() {
+    local bdf path
+    bdf=$1
+    path=$(readlink -f "/sys/bus/pci/devices/$bdf") || die "$bdf has no sysfs path"
+    basename "$(dirname "$path")"
+}
+nvidia_link_line() {
+    local bdf short
+    bdf=$1
+    short=${bdf#0000:}
+    timeout 10 nvidia-smi --query-gpu=pci.bus_id,pcie.link.gen.current,pcie.link.gen.max \
+        --format=csv,noheader 2>/dev/null | awk -F, -v short="$short" \
+        'index(tolower($1), tolower(short)) { print; exit }'
+}
+nvidia_max_gen() {
+    local line
+    line=$(nvidia_link_line "$1")
+    [[ -n $line ]] || return 1
+    awk -F, '{gsub(/[[:space:]]/, "", $3); print $3}' <<< "$line"
+}
+nvidia_current_gen() {
+    local line
+    line=$(nvidia_link_line "$1")
+    [[ -n $line ]] || return 1
+    awk -F, '{gsub(/[[:space:]]/, "", $2); print $2}' <<< "$line"
+}
+config_rate_field() {
+    local value=$1
+    printf '%d\n' "$(((value >> 18) & 3))"
+}
+
+report_gpu_holders() {
+    # NVML compute-apps omits monitoring clients that can still hold UVM open.
+    # Print only process names, cgroups and device paths, never command lines.
+    python3 - <<'PY'
+from pathlib import Path
+import json
+for process in Path('/proc').iterdir():
+    if not process.name.isdigit():
+        continue
+    try:
+        devices = set()
+        for fd in (process / 'fd').iterdir():
+            try:
+                target = str(fd.readlink())
+                if target.startswith('/dev/nvidia'):
+                    devices.add(target)
+            except OSError:
+                pass
+        if devices:
+            print(json.dumps({'gpu_holder_pid': int(process.name),
+                              'comm': (process / 'comm').read_text().strip(),
+                              'cgroup': (process / 'cgroup').read_text().strip(),
+                              'devices': sorted(devices)}), flush=True)
+    except OSError:
+        pass
+PY
+}
+
+[[ $EUID -eq 0 ]] || die 'run as root'
+for command in awk busybox dd dmesg flock grep insmod modinfo modprobe nvidia-smi python3 rm rmmod setpci sha256sum stat systemctl timeout; do
+    command -v "$command" >/dev/null || die "missing command: $command"
+done
+mkdir -p /run/lock
+exec 9>"$LOCK"
+flock -w 120 9 || die "another CMP100 PCIe operation holds $LOCK"
+if [[ -e $DEFAULTS ]]; then
+    assert_root_regular "$DEFAULTS"
+    explicit_bdfs=${CMP100_PCIE_BDFS-}
+    source "$DEFAULTS"
+    [[ -z $explicit_bdfs ]] || CMP100_PCIE_BDFS=$explicit_bdfs
+fi
+if [[ $(systemctl show cmp100-tensor-unlock.service -p ActiveState --value) == activating ]]; then
+    die 'Tensor unlock is still starting; serialize PCIe after that service'
+fi
+
+assert_root_regular "$MANIFEST"
+[[ $(stat -c '%a' "$MANIFEST") == 600 ]] || die "manifest permissions must be 0600: $MANIFEST"
+# shellcheck disable=SC1090
+source "$MANIFEST"
+for variable in STOCK_FECS_SHA STOCK_BL_SHA STOCK_UCODE_SHA CUSTOM_FECS_SHA CUSTOM_BL_SHA PCIE_POLICY_UCODE_SHA PCIE_VECTOR_UCODE_SHA HOOK_SHA; do
+    [[ -n ${!variable:-} ]] || die "manifest lacks $variable"
+done
+[[ $PCIE_POLICY_UCODE_SHA == "$EXPECTED_POLICY_SHA" ]] || die 'unexpected PCIe policy payload hash'
+[[ $PCIE_VECTOR_UCODE_SHA == "$EXPECTED_VECTOR_SHA" ]] || die 'unexpected PCIe vector payload hash'
+
+assert_sha "$STOCK_FECS" "$STOCK_FECS_SHA"
+assert_sha "$STOCK_BL" "$STOCK_BL_SHA"
+assert_sha "$STOCK_UCODE" "$STOCK_UCODE_SHA"
+assert_sha "$CUSTOM_FECS" "$CUSTOM_FECS_SHA"
+assert_sha "$CUSTOM_BL" "$CUSTOM_BL_SHA"
+assert_sha "$PCIE_POLICY" "$PCIE_POLICY_UCODE_SHA"
+assert_sha "$PCIE_VECTOR" "$PCIE_VECTOR_UCODE_SHA"
+assert_sha "$HOOK" "$HOOK_SHA"
+[[ $(modinfo -F vermagic "$HOOK") == "$(uname -r)"* ]] || die 'hook vermagic does not match running kernel'
+
+ACTIVE_FECS=$(resolve_firmware "$FW_FECS")
+ACTIVE_BL=$(resolve_firmware "$FW_BL")
+ACTIVE_UCODE=$(resolve_firmware "$FW_UCODE")
+[[ $(sha_of "$ACTIVE_FECS") == "$STOCK_FECS_SHA" ]] || die 'active fecs firmware is not the recorded original'
+[[ $(sha_of "$ACTIVE_BL") == "$STOCK_BL_SHA" ]] || die 'active bl firmware is not the recorded original'
+[[ $(sha_of "$ACTIVE_UCODE") == "$STOCK_UCODE_SHA" ]] || die 'active ucode firmware is not the recorded original'
+
+[[ -n ${CMP100_PCIE_BDFS:-} ]] || die 'set explicit CMP100_PCIE_BDFS allow-list before a Gen2 operation'
+read -r -a TARGETS <<< "$CMP100_PCIE_BDFS"
+(( ${#TARGETS[@]} > 0 )) || die 'empty CMP100_PCIE_BDFS allow-list'
+
+declare -A seen_bdfs=()
+for bdf in "${TARGETS[@]}"; do
+    [[ $bdf =~ ^0000:[0-9a-fA-F]{2}:00\.0$ ]] || die "unsupported BDF shape: $bdf"
+    [[ -z ${seen_bdfs[$bdf]:-} ]] || die "duplicate BDF: $bdf"
+    seen_bdfs[$bdf]=1
+    devdir=/sys/bus/pci/devices/$bdf
+    [[ -d $devdir ]] || die "missing PCI device: $bdf"
+    [[ $(<"$devdir/vendor") == 0x10de && $(<"$devdir/device") == 0x1d84 ]] || die "$bdf is not CMP100 10de:1d84"
+    [[ $(driver_of "$bdf") == nvidia ]] || die "$bdf must start bound to nvidia"
+    endpoint_cap=$(pcie_cap_speed "$bdf")
+    root_bdf=$(parent_port "$bdf")
+    [[ -d /sys/bus/pci/devices/$root_bdf ]] || die "$bdf has no PCIe parent port"
+    root_cap=$(pcie_cap_speed "$root_bdf")
+    (( root_cap >= 2 )) || die "$root_bdf does not support Gen2"
+done
+
+# This is read-only while NVIDIA remains bound.  A fully completed prior run
+# needs no service stop, detach, firmware replacement or MMIO write.
+all_done=1
+for bdf in "${TARGETS[@]}"; do
+    link_word=$(pcie_word "$bdf" 12)
+    current=$(nvidia_current_gen "$bdf" || true)
+    advertised=$(nvidia_max_gen "$bdf" || true)
+    if [[ $current != 2 || ! $advertised =~ ^[0-9]+$ ]] ||
+       (( advertised < 2 || (16#$link_word & 0xf) != 2 || (16#$link_word & 0x800) != 0 )); then
+        all_done=0
+    fi
+done
+if (( all_done )); then
+    say 'All allow-listed CMP100s already report Gen2 with the GV100 field encoding; no changes made.'
+    SUCCESS=1
+    exit 0
+fi
+
+if [[ -n ${CMP100_PCIE_STOP_SERVICES:-} ]]; then
+    for unit in $CMP100_PCIE_STOP_SERVICES; do
+        if systemctl is-active --quiet "$unit"; then
+            STOPPED_SERVICES+=("$unit")
+            say "Stopping configured workload service $unit"
+            timeout 45 systemctl stop "$unit" || die "could not stop $unit"
+        fi
+    done
+fi
+clients=$(timeout 10 nvidia-smi --query-compute-apps=pid --format=csv,noheader) || die 'could not enumerate GPU clients'
+if grep -Eq '[0-9]+' <<< "$clients"; then
+    die 'GPU compute client remains; stop it before retraining'
+fi
+if systemctl is-active --quiet nvidia-persistenced.service 2>/dev/null; then
+    PERSISTENCED_WAS_ACTIVE=1
+fi
+systemctl stop nvidia-persistenced.service 2>/dev/null || true
+for module in nvidia_uvm nvidia_drm nvidia_modeset; do
+    if grep -q "^${module} " /proc/modules; then
+        INITIALLY_LOADED_MODULES+=("$module")
+        # Allow transient users to finish; never force removal or kill clients.
+        for attempt in $(seq 1 10); do
+            if modprobe -r "$module" 2>/dev/null; then
+                break
+            fi
+            sleep 1
+        done
+        if [[ -d /sys/module/$module ]]; then
+            report_gpu_holders
+            die "cannot unload $module; stop the reported GPU holders before retrying"
+        fi
+    fi
+done
+modprobe nouveau
+
+BACKUP_DIR=$(mktemp -d /run/cmp100-pcie.XXXXXX)
+install -m 0600 "$ACTIVE_FECS" "$BACKUP_DIR/fecs_sig.bin"
+install -m 0600 "$ACTIVE_BL" "$BACKUP_DIR/bl.bin"
+install -m 0600 "$ACTIVE_UCODE" "$BACKUP_DIR/ucode_load.bin"
+MUTATING=1
+
+apply_signed_write() {
+    local bdf=$1 payload=$2 label=$3 bus_hex bus_dec devdir before_count after_count boot_line
+    bus_hex=${bdf#0000:}
+    bus_hex=${bus_hex%%:*}
+    bus_dec=$((16#$bus_hex))
+    devdir=/sys/bus/pci/devices/$bdf
+
+    say "$bdf: signed ACR $label"
+    printf 'test-hold' > "$devdir/driver_override"
+    printf '%s' "$bdf" > /sys/bus/pci/drivers/nvidia/unbind
+    [[ -z $(driver_of "$bdf") ]] || die "$bdf did not unbind from nvidia"
+    tensor=$(mmio_read "$(mmio_at "$bdf" 0x409664)")
+    (( tensor == 0x888 )) || die "$bdf Tensor prerequisite is not unlocked"
+
+    remove_hook
+    insmod "$HOOK" bus="$bus_dec" armed=1 replace_on_return=2 load_test_size=0x5d00
+    before_count=$(dmesg | grep -c 'gv100_nouveau_acr_hook: BOOT_RETURN' || true)
+    copy_content "$CUSTOM_FECS" "$ACTIVE_FECS"
+    copy_content "$CUSTOM_BL" "$ACTIVE_BL"
+    copy_content "$payload" "$ACTIVE_UCODE"
+    sync
+
+    printf 'nouveau' > "$devdir/driver_override"
+    printf '%s' "$bdf" > /sys/bus/pci/drivers/nouveau/bind
+    wait_driver "$bdf" nouveau || die "$bdf did not bind Nouveau for $label"
+    after_count=$(dmesg | grep -c 'gv100_nouveau_acr_hook: BOOT_RETURN' || true)
+    (( after_count > before_count )) || die "$bdf produced no BOOT_RETURN for $label"
+    boot_line=$(dmesg | grep 'gv100_nouveau_acr_hook: BOOT_RETURN' | tail -n 1)
+    say "$bdf: $boot_line"
+    [[ $boot_line == *'function_rc=0'* ]] || die "$bdf ACR return failed for $label"
+
+    restore_stock
+    remove_hook
+    printf 'test-hold' > "$devdir/driver_override"
+    printf '%s' "$bdf" > /sys/bus/pci/drivers/nouveau/unbind
+    [[ -z $(driver_of "$bdf") ]] || die "$bdf did not unbind Nouveau after $label"
+    if [[ $payload == "$PCIE_POLICY" ]]; then
+        actual=$(mmio_read "$(mmio_at "$bdf" 0x88610)")
+        (( actual == 1 )) || die "$bdf signed policy readback mismatch"
+    else
+        actual=$(mmio_read "$(mmio_at "$bdf" 0x8872c)")
+        (( actual == 6 )) || die "$bdf signed vector readback mismatch"
+    fi
+    printf 'nvidia' > "$devdir/driver_override"
+    printf '%s' "$bdf" > /sys/bus/pci/drivers/nvidia/bind
+    wait_driver "$bdf" nvidia || die "$bdf did not rebind NVIDIA after $label"
+    wait_nvidia_bdf "$bdf" || die "$bdf absent from nvidia-smi after $label"
+}
+
+for bdf in "${TARGETS[@]}"; do
+    apply_signed_write "$bdf" "$PCIE_POLICY" 'policy 0x88610=1'
+    apply_signed_write "$bdf" "$PCIE_VECTOR" 'vector 0x8872c=6'
+    advertised=$(nvidia_max_gen "$bdf" || true)
+    [[ $advertised =~ ^[0-9]+$ ]] && (( advertised >= 2 )) || die "$bdf NVIDIA policy did not advertise Gen2"
+done
+
+retrain_one() {
+    local bdf=$1 devdir=/sys/bus/pci/devices/$1 cfg_addr status_addr cfg before after final_cfg request status attempt
+    cfg_addr=$(mmio_at "$bdf" 0x8c040)
+    status_addr=$(mmio_at "$bdf" 0x88088)
+    say "$bdf: unbind NVIDIA for bounded Gen2 retrain"
+    printf 'test-hold' > "$devdir/driver_override"
+    printf '%s' "$bdf" > /sys/bus/pci/drivers/nvidia/unbind
+    [[ -z $(driver_of "$bdf") ]] || die "$bdf did not unbind from NVIDIA before retrain"
+    target=$(mmio_read "$(mmio_at "$bdf" 0x880a8)")
+    cap=$(mmio_read "$(mmio_at "$bdf" 0x88084)")
+    (( (target & 15) == 2 && (cap & 15) >= 2 )) || die "$bdf Gen2 capability/target prerequisites failed"
+
+    before=$(mmio_read "$cfg_addr")
+    field=$(config_rate_field "$before")
+    (( field == 1 || field == 2 )) || die "$bdf unexpected 0x8c040 rate field $field"
+    request=$(( (before & ~0x000c0000) | 0x00040000 ))
+    mmio_write "$cfg_addr" "$(printf '0x%08x' "$request")"
+    after=$(mmio_read "$cfg_addr")
+    (( after == request )) || die "$bdf did not retain corrected 0x8c040 value"
+    mmio_write "$cfg_addr" "$(printf '0x%08x' "$((request | 1))")"
+
+    # Ten short probes keep the post-write wait under roughly one second,
+    # rather than allowing an open-ended link-training wait in a boot unit.
+    for attempt in $(seq 1 10); do
+        status=$(mmio_read "$status_addr")
+        if (( ((status >> 16) & 0xf) == 2 )); then
+            break
+        fi
+        sleep 0.1
+    done
+    (( ((status >> 16) & 0xf) == 2 )) || die "$bdf did not reach physical Gen2 within the bounded wait"
+    final_cfg=$(mmio_read "$cfg_addr")
+    (( (final_cfg & 1) == 0 )) || die "$bdf CHANGE_SPEED did not self-clear"
+    (( $(config_rate_field "$final_cfg") == 1 )) || die "$bdf lost corrected Gen2 rate field"
+    say "$bdf: physical BAR0[0x88088]=$status reports Gen2"
+
+    printf 'nvidia' > "$devdir/driver_override"
+    printf '%s' "$bdf" > /sys/bus/pci/drivers/nvidia/bind
+    wait_driver "$bdf" nvidia || die "$bdf did not rebind NVIDIA after retrain"
+    wait_nvidia_bdf "$bdf" || die "$bdf absent from nvidia-smi after retrain"
+    current=$(nvidia_current_gen "$bdf" || true)
+    advertised=$(nvidia_max_gen "$bdf" || true)
+    [[ $current == 2 && $advertised =~ ^[0-9]+$ ]] && (( advertised >= 2 )) || die "$bdf NVIDIA did not retain Gen2"
+}
+
+for bdf in "${TARGETS[@]}"; do
+    retrain_one "$bdf"
+done
+
+restore_stock
+remove_hook
+SUCCESS=1
+say 'All selected CMP100s report physical and NVIDIA Gen2:'
+nvidia-smi --query-gpu=index,pci.bus_id,name,driver_version,pcie.link.gen.current,pcie.link.gen.max --format=csv,noheader
