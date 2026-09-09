@@ -16,6 +16,8 @@ separated from the broader private laboratory repository.
 - the narrow Nouveau ACR kernel hook;
 - fail-closed Tensor and PCIe Gen2 runtime helpers;
 - installation scripts, oneshot units and one-time Debian 13 tutorials;
+- the non-persistent Coolbits/NV-CONTROL HBM clock helper and its measured
+  V100-like 877 MHz operating point;
 - hashes of the published evidence.
 
 ## Still withheld

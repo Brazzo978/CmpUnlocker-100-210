@@ -13,10 +13,13 @@ validated Tensor and PCIe Gen2 results. See [Disclosure boundary](DISCLOSURE.md)
 
 - [Debian 13: one-time Tensor unlock](docs/DEBIAN13-TENSOR-ONESHOT.md)
 - [Debian 13: one-time PCIe Gen2 unlock](docs/DEBIAN13-PCIE-GEN2-ONESHOT.md)
+- [Debian 13: one-time V100-like HBM clock](docs/DEBIAN13-HBM-V100-CLOCK-ONESHOT.md)
 
-Both guides default to a single manual application. They install systemd
-oneshot units but do not enable them at boot. Use the exact Debian 13,
-NVIDIA `550.163.01` and GV100 firmware baseline documented in the guides.
+The Tensor and PCIe guides default to a single manual application. Their
+systemd units are installed but not enabled at boot. The separate HBM guide is
+an optional one-shot overclock and deliberately installs no boot service. Use
+the exact Debian 13, NVIDIA `550.163.01` and hardware/firmware baseline
+documented in each guide.
 
 ## Results
 
@@ -26,6 +29,7 @@ NVIDIA `550.163.01` and GV100 firmware baseline documented in the guides.
 | PCIe Gen2 | **Working on two tested x1 paths** | Both endpoints negotiated Gen2 x1; pinned 32 MiB transfers were approximately 417/419 MB/s versus a 207/209 MB/s stock-control measurement |
 | PCIe Gen3 | **Not achieved** | Making the software policy request Gen3 was insufficient: the endpoint continued to expose a 5 GT/s maximum and rejected the 8 GT/s target before any observable equalization |
 | PCIe width | **Still open** | Both tested cards remained x1, including behind Gen3 x8- and Gen3 x16-capable upstream paths; no x16 result is claimed |
+| HBM2 clock | **Working as an optional software overclock** | Coolbits/NV-CONTROL raised the tested cards from the stock CMP 810 MHz operating point to 877 MHz, with repeated 32 MiB D2D sample bandwidth rising from approximately 676 to 733 GB/s |
 
 The interventions used during the private experiment were volatile. Resetting
 or power-cycling restored the stock state.
@@ -35,6 +39,7 @@ or power-cycling restored the stock state.
 - [Tensor result and benchmark parameters](docs/TENSOR-RESULTS.md)
 - [PCIe Gen2 and width measurements](docs/PCIE-RESULTS.md)
 - [Gen3 negative result](docs/GEN3-LIMIT.md)
+- [V100-like HBM clock procedure and measurements](docs/DEBIAN13-HBM-V100-CLOCK-ONESHOT.md)
 - [Test methodology and limitations](docs/METHODOLOGY.md)
 - [Captured Tensor benchmark output](results/tensor-benchmark.txt)
 - [Evidence checksums](results/SHA256SUMS)
@@ -49,8 +54,11 @@ Operational components:
   Nouveau ACR handoff;
 - `scripts/cmp100-tensor-unlock` and `scripts/cmp100-pcie-gen2` implement the
   fail-closed, volatile operations;
-- the two systemd units provide bounded manual execution and optional boot
-  integration. The tutorials do not enable them automatically.
+- `scripts/cmp100-hbm-v100-clock` starts a temporary headless NV-CONTROL
+  session and applies the separately optional, volatile 877 MHz HBM overclock;
+- the Tensor and PCIe systemd units provide bounded manual execution and
+  optional boot integration. The tutorials do not enable them automatically;
+  the public HBM procedure remains one-shot only.
 
 Validation components:
 

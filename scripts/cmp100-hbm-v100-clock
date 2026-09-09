@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
+set -Eeuo pipefail
+
+STATE_DIR=/run/cmp100-hbm-v100-clock
+DISPLAY_NAME=${CMP100_HBM_DISPLAY:-:99}
+TRANSFER_OFFSET=${CMP100_HBM_TRANSFER_OFFSET:-138}
+EXPECTED_CLOCK=${CMP100_HBM_EXPECTED_CLOCK:-877}
+EXPECTED_DEVICE=0x1D8410DE
+EXPECTED_VBIOS=88.00.9D.00.00
+EXPECTED_DRIVER=550.163.01
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+trim() {
+    local value=$1
+    value=${value#"${value%%[![:space:]]*}"}
+    value=${value%"${value##*[![:space:]]}"}
+    printf '%s' "$value"
+}
+
+require_environment() {
+    [[ $EUID -eq 0 ]] || die 'run as root'
+    [[ $DISPLAY_NAME =~ ^:[0-9]+$ ]] || die "invalid display: $DISPLAY_NAME"
+    [[ $TRANSFER_OFFSET =~ ^[0-9]+$ ]] || die 'offset must be an integer'
+    [[ $EXPECTED_CLOCK =~ ^[0-9]+$ ]] || die 'expected clock must be an integer'
+    (( TRANSFER_OFFSET >= 0 && TRANSFER_OFFSET <= 1100 )) || die 'offset is outside 0..1100'
+    for command in nvidia-smi nvidia-settings Xorg awk; do
+        command -v "$command" >/dev/null || die "missing command: $command"
+    done
+}
+
+discover_gpus() {
+    GPU_INDEXES=()
+    GPU_BDFS=()
+    local index bdf device name vbios driver
+    while IFS=',' read -r index bdf device name vbios driver; do
+        index=$(trim "$index")
+        bdf=$(trim "$bdf")
+        device=$(trim "$device")
+        name=$(trim "$name")
+        vbios=$(trim "$vbios")
+        driver=$(trim "$driver")
+        [[ $device == "$EXPECTED_DEVICE" ]] || continue
+        [[ $name == 'NVIDIA CMP 100-210' ]] || die "GPU $index has unexpected name: $name"
+        [[ $vbios == "$EXPECTED_VBIOS" ]] || die "GPU $index has untested VBIOS: $vbios"
+        [[ $driver == "$EXPECTED_DRIVER" ]] || die "GPU $index has untested driver: $driver"
+        GPU_INDEXES+=("$index")
+        GPU_BDFS+=("$bdf")
+    done < <(nvidia-smi \
+        --query-gpu=index,pci.bus_id,pci.device_id,name,vbios_version,driver_version \
+        --format=csv,noheader)
+    ((${#GPU_INDEXES[@]} > 0)) || die 'no tested CMP100-210 device found'
+}
+
+format_x_bus_id() {
+    local bdf=$1
+    local stripped domain_hex bus_hex device_func device_hex function_hex
+    local domain_dec bus_dec device_dec function_dec
+    stripped=${bdf#0000}
+    domain_hex=${stripped%%:*}
+    stripped=${stripped#*:}
+    bus_hex=${stripped%%:*}
+    device_func=${stripped#*:}
+    device_hex=${device_func%%.*}
+    function_hex=${device_func#*.}
+    domain_dec=$((16#$domain_hex))
+    bus_dec=$((16#$bus_hex))
+    device_dec=$((16#$device_hex))
+    function_dec=$((16#$function_hex))
+    if ((domain_dec == 0)); then
+        printf 'PCI:%d:%d:%d' "$bus_dec" "$device_dec" "$function_dec"
+    else
+        printf 'PCI:%d@%d:%d:%d' "$domain_dec" "$bus_dec" "$device_dec" "$function_dec"
+    fi
+}
+
+make_xorg_config() {
+    local position index x_bus_id
+    install -d -m 0700 "$STATE_DIR"
+    cat >"$STATE_DIR/xorg.conf" <<EOF
+Section "ServerLayout"
+    Identifier "CMP100HBMLayout"
+    Option "AllowNVIDIAGPUScreens" "True"
+EOF
+    for position in "${!GPU_INDEXES[@]}"; do
+        printf '    Screen %d "CMP100HBMScreen%d"\n' "$position" "$position" \
+            >>"$STATE_DIR/xorg.conf"
+    done
+    cat >>"$STATE_DIR/xorg.conf" <<'EOF'
+EndSection
+EOF
+    for position in "${!GPU_INDEXES[@]}"; do
+        index=${GPU_INDEXES[$position]}
+        x_bus_id=$(format_x_bus_id "${GPU_BDFS[$position]}")
+        cat >>"$STATE_DIR/xorg.conf" <<EOF
+Section "Device"
+    Identifier "CMP100GPU${position}"
+    Driver "nvidia"
+    BusID "$x_bus_id"
+    Screen 0
+    Option "AllowEmptyInitialConfiguration" "True"
+    Option "UseDisplayDevice" "None"
+    Option "Coolbits" "8"
+EndSection
+
+Section "Screen"
+    Identifier "CMP100HBMScreen${position}"
+    Device "CMP100GPU${position}"
+EndSection
+EOF
+    done
+    chmod 0600 "$STATE_DIR/xorg.conf"
+}
+
+set_offset() {
+    local offset=$1 index
+    for index in "${GPU_INDEXES[@]}"; do
+        nvidia-settings -c "$DISPLAY_NAME" \
+            -a "[gpu:${index}]/GPUMemoryTransferRateOffsetAllPerformanceLevels=${offset}"
+    done
+}
+
+show_status() {
+    discover_gpus
+    local index
+    for index in "${GPU_INDEXES[@]}"; do
+        nvidia-smi -i "$index" \
+            --query-gpu=index,name,pstate,clocks.current.memory,temperature.gpu,power.draw \
+            --format=csv,noheader
+        if [[ -S /tmp/.X11-unix/X${DISPLAY_NAME#:} ]]; then
+            nvidia-settings -c "$DISPLAY_NAME" -q \
+                "[gpu:${index}]/GPUMemoryTransferRateOffsetAllPerformanceLevels"
+        fi
+    done
+}
+
+start_clock() {
+    discover_gpus
+    local display_number=${DISPLAY_NAME#:}
+    local socket=/tmp/.X11-unix/X${display_number}
+    [[ ! -e $socket ]] || die "$DISPLAY_NAME is already in use"
+    make_xorg_config
+
+    Xorg "$DISPLAY_NAME" -noreset -nolisten tcp \
+        -config "$STATE_DIR/xorg.conf" \
+        -logfile "$STATE_DIR/Xorg.log" >"$STATE_DIR/Xorg.stdout" 2>&1 &
+    local xorg_pid=$!
+    printf '%s\n' "$xorg_pid" >"$STATE_DIR/xorg.pid"
+
+    local ready=0 attempt
+    for attempt in {1..20}; do
+        if [[ -S $socket ]] && nvidia-settings -c "$DISPLAY_NAME" -q gpus >/dev/null 2>&1; then
+            ready=1
+            break
+        fi
+        kill -0 "$xorg_pid" 2>/dev/null || break
+        sleep 0.25
+    done
+    if ((ready == 0)); then
+        kill "$xorg_pid" 2>/dev/null || true
+        die "headless Xorg did not become ready; inspect $STATE_DIR/Xorg.log"
+    fi
+
+    local exposed
+    exposed=$(nvidia-settings -c "$DISPLAY_NAME" -q gpus 2>/dev/null | \
+        awk '/\[gpu:[0-9]+\]/{count++} END{print count+0}')
+    if ((exposed != ${#GPU_INDEXES[@]})); then
+        kill "$xorg_pid" 2>/dev/null || true
+        die "NV-CONTROL exposed $exposed GPU(s), expected ${#GPU_INDEXES[@]}"
+    fi
+
+    if ! set_offset "$TRANSFER_OFFSET"; then
+        set_offset 0 || true
+        kill "$xorg_pid" 2>/dev/null || true
+        die 'NV-CONTROL rejected the HBM transfer-rate offset'
+    fi
+    sleep 1
+
+    local index actual
+    for index in "${GPU_INDEXES[@]}"; do
+        actual=$(nvidia-smi -i "$index" \
+            --query-gpu=clocks.current.memory --format=csv,noheader,nounits | tr -d '[:space:]')
+        if [[ $actual != "$EXPECTED_CLOCK" ]]; then
+            set_offset 0 || true
+            kill "$xorg_pid" 2>/dev/null || true
+            die "GPU $index reached ${actual} MHz, expected ${EXPECTED_CLOCK} MHz"
+        fi
+        echo "PASS: GPU $index HBM clock is ${actual} MHz"
+    done
+    echo "Headless NV-CONTROL display $DISPLAY_NAME is PID $xorg_pid."
+    echo "Run '$0 reset' to restore the stock clock."
+}
+
+reset_clock() {
+    discover_gpus
+    if [[ -S /tmp/.X11-unix/X${DISPLAY_NAME#:} ]]; then
+        set_offset 0 || true
+    fi
+    if [[ -r $STATE_DIR/xorg.pid ]]; then
+        local pid
+        pid=$(<"$STATE_DIR/xorg.pid")
+        [[ $pid =~ ^[0-9]+$ ]] && kill "$pid" 2>/dev/null || true
+    fi
+    rm -rf -- "$STATE_DIR"
+    echo 'CMP100 HBM offset reset; current clocks:'
+    nvidia-smi --query-gpu=index,name,clocks.current.memory --format=csv,noheader
+}
+
+usage() {
+    echo "Usage: $0 {start|status|reset}" >&2
+    exit 2
+}
+
+require_environment
+case ${1:-} in
+    start) start_clock ;;
+    status) show_status ;;
+    reset) reset_clock ;;
+    *) usage ;;
+esac

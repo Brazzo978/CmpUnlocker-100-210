@@ -12,7 +12,8 @@ Allowed categories:
 - read-only state collectors;
 - compute benchmarks;
 - evidence checksums.
-- reviewed source and scripts required by the supported Tensor/Gen2 release;
+- reviewed source and scripts required by the supported Tensor/Gen2 release
+  and the bounded, volatile V100-like HBM clock procedure;
 - exact-firmware builders that distribute no proprietary firmware blob;
 - bounded, fail-closed installers and oneshot units.
 
@@ -33,7 +34,7 @@ Before every public push:
 5. confirm that the commit contains no generated archive or binary other than
    the approved benchmark image;
 6. confirm that operational changes remain limited to the documented
-   Tensor/Gen2 scope and retain all fail-closed checks;
+   Tensor/Gen2/HBM scope and retain all fail-closed checks;
 7. push only after all checks pass.
 
 Never use `git add .` in this repository. Stage explicit paths.
