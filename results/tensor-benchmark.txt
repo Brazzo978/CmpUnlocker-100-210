@@ -1,0 +1,14 @@
+CMP100-210 VOLTA TENSOR PATH - FP16 GEMM VALIDATION
+PyTorch 2.6.0+cu124 | CUDA 12.4
+matrix=8192x8192 | warmup=8 | repeats=15
+------------------------------------------------------------------------
+GPU 0: NVIDIA CMP 100-210
+  FP16 Tensor GEMM median :   74.179 TFLOPS
+  sample range            :   74.036 -   75.600 TFLOPS
+  result validation       : PASS
+GPU 1: NVIDIA CMP 100-210
+  FP16 Tensor GEMM median :   75.040 TFLOPS
+  sample range            :   74.550 -   76.537 TFLOPS
+  result validation       : PASS
+------------------------------------------------------------------------
+PASS: both CMP100 GPUs completed FP16 Tensor GEMM validation

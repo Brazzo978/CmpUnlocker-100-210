@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+*.log
+*.bin
+*.ko
+*.rom
+*.fw
+*.efi
+*.zip
+*.tar
+*.tar.gz
