@@ -1,7 +1,8 @@
 # Publication boundary for maintainers
 
-The public tree is an allowlist, not a filtered copy of the private laboratory
-repository.
+The public tree is an exact file allowlist, not a filtered copy of the private
+laboratory repository. Adding a new evidence file requires a deliberate update
+to `APPROVED_FILES` in `tools/check_public_boundary.py`.
 
 Allowed categories:
 

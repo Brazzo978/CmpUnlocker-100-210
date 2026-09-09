@@ -10,7 +10,21 @@ import sys
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-APPROVED_TOOLS = {
+APPROVED_FILES = {
+    ".github/workflows/public-boundary.yml",
+    ".gitignore",
+    "DISCLOSURE.md",
+    "LICENSE",
+    "PUBLICATION_BOUNDARY.md",
+    "README.md",
+    "SECURITY.md",
+    "docs/GEN3-LIMIT.md",
+    "docs/METHODOLOGY.md",
+    "docs/PCIE-RESULTS.md",
+    "docs/TENSOR-RESULTS.md",
+    "results/SHA256SUMS",
+    "results/tensor-benchmark.png",
+    "results/tensor-benchmark.txt",
     "tools/benchmark_tensor.py",
     "tools/check_public_boundary.py",
     "tools/collect_state.sh",
@@ -22,7 +36,21 @@ DENIED_SUFFIXES = {
     ".ko",
     ".rom",
 }
-WRITE_CAPABLE_PATTERNS = {
+SENSITIVE_PATTERNS = {
+    "private IPv4 address": re.compile(
+        r"\b(?:10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|"
+        r"172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2})\b"
+    ),
+    "private key": re.compile(r"BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY"),
+    "credential assignment": re.compile(
+        r"(?i)\b(?:password|passwd|token|api[_-]?key)\s*[:=]"
+    ),
+    "proprietary register literal": re.compile(r"\b0x[0-9a-fA-F]{5,}\b"),
+    "private RM symbol": re.compile(r"\b_nv\d+rm\b"),
+    "private implementation marker": re.compile(
+        r"(?i)\b(?:build_payloads|nouveau_acr_hook|dependency-map|"
+        r"ucode_load|fecs_sig|replace_on_return|arm_write)\b"
+    ),
     "device-memory access": re.compile(r"/dev/(?:mem|port)"),
     "kernel-module operation": re.compile(
         r"\b(?:insmod|rmmod|modprobe)\b"
@@ -58,18 +86,18 @@ def main() -> int:
         path = ROOT / relative
         suffix = path.suffix.lower()
 
+        if relative not in APPROVED_FILES:
+            failures.append(f"file is not allowlisted: {relative}")
+
         if suffix in DENIED_SUFFIXES:
             failures.append(f"forbidden binary/payload type: {relative}")
-
-        if relative.startswith("tools/") and relative not in APPROVED_TOOLS:
-            failures.append(f"tool is not allowlisted: {relative}")
 
         if relative == "tools/check_public_boundary.py":
             continue
 
-        if relative.startswith("tools/"):
+        if suffix in {"", ".md", ".py", ".sh", ".txt", ".yml"}:
             text = path.read_text(encoding="utf-8", errors="replace")
-            for label, pattern in WRITE_CAPABLE_PATTERNS.items():
+            for label, pattern in SENSITIVE_PATTERNS.items():
                 if pattern.search(text):
                     failures.append(f"{label} found in {relative}")
 
