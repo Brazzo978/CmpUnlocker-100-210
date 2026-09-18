@@ -22,7 +22,7 @@ APPROVED_FILES = {
     "install-pcie-guest.sh",
     "install.sh",
     "docs/DEBIAN13-PCIE-GEN2-ONESHOT.md",
-    "docs/DEBIAN13-HBM-V100-CLOCK-ONESHOT.md",
+    "docs/NVML-TELEMETRY-AND-CLOCKS.md",
     "docs/DEBIAN13-TENSOR-ONESHOT.md",
     "docs/GEN3-LIMIT.md",
     "docs/METHODOLOGY.md",
@@ -32,7 +32,6 @@ APPROVED_FILES = {
     "results/tensor-benchmark.png",
     "results/tensor-benchmark.txt",
     "scripts/cmp100-pcie-gen2",
-    "scripts/cmp100-hbm-v100-clock",
     "scripts/cmp100-tensor-unlock",
     "src/Makefile",
     "src/gv100_nouveau_acr_hook.c",
@@ -42,6 +41,9 @@ APPROVED_FILES = {
     "tools/build_payloads.py",
     "tools/check_public_boundary.py",
     "tools/collect_state.sh",
+    "tools/cmp100-nvml-clock-v2.rs",
+    "tools/cupti_legacy_probe.c",
+    "tools/gpumon_v3_llama.c",
 }
 DENIED_SUFFIXES = {
     ".bin",
@@ -77,12 +79,28 @@ def candidate_files() -> list[str]:
     ]
 
 
+def staged_deletions() -> set[str]:
+    completed = subprocess.run(
+        ["git", "diff", "--cached", "--diff-filter=D", "--name-only", "-z"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+    )
+    return {item.decode("utf-8") for item in completed.stdout.split(b"\0") if item}
+
+
 def main() -> int:
     failures: list[str] = []
     files = candidate_files()
+    deletions = staged_deletions()
 
     for relative in files:
         path = ROOT / relative
+        if relative in deletions:
+            continue
+        if path.is_symlink() or not path.is_file():
+            failures.append(f"tracked path is not a regular file: {relative}")
+            continue
         suffix = path.suffix.lower()
 
         if relative not in APPROVED_FILES:
