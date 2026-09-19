@@ -76,5 +76,5 @@ echo 'Install complete. Stop every process using the CMP100 GPUs, then run:'
 echo '  sudo systemctl start cmp100-tensor-unlock.service'
 echo '  sudo journalctl -u cmp100-tensor-unlock.service -b --no-pager'
 echo
-echo 'Enable at boot only after the manual run passes:'
-echo '  sudo systemctl enable cmp100-tensor-unlock.service'
+echo 'For optional boot integration, follow docs/DEBIAN13-BOOT-PROFILE.md'
+echo 'only after every manual stage passes.'

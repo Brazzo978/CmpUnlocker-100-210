@@ -1,8 +1,8 @@
 [Unit]
 Description=Apply volatile physical Gen2 retrain to CMP100 GV100 GPUs
 After=systemd-modules-load.service cmp100-tensor-unlock.service nvidia-persistenced.service
-# Keep interactive monitors and container workloads out of the driver handoff.
-Before=unsloth-studio.service docker.service ssh.service sshd.service systemd-user-sessions.service getty.target
+# Keep interactive monitors and common container/user workloads out of the driver handoff.
+Before=docker.service ssh.service sshd.service systemd-user-sessions.service getty.target
 
 [Service]
 Type=oneshot

@@ -3,7 +3,7 @@
 ## Outcome
 
 Two NVIDIA CMP100-210 cards completed a reproducible FP16 matrix-multiplication
-benchmark after a volatile private research intervention:
+benchmark after applying the published volatile Tensor procedure:
 
 | GPU | Median | Sample range | Validation |
 | --- | ---: | ---: | --- |

@@ -6,10 +6,8 @@ producer for the schema-3 JSON consumed by `gpumon`.
 
 The patch is intentionally pinned to the public Unsloth release
 `b10715-mix-86bd2d3`, whose tag resolves to commit
-`df9d4a507d5123dfc1a6ae6e96b85af4644ef64b`. The installed bundle used for the
-live validation identifies its embedded source as `92cedc867`; that object is
-not itself the public release tag to check out. Apply the patch to the tag,
-not to an arbitrary newer `llama.cpp` tree.
+`df9d4a507d5123dfc1a6ae6e96b85af4644ef64b`. Apply the patch to that tag, not
+to an arbitrary newer `llama.cpp` tree.
 
 No NVIDIA library, CUDA header, model, or prebuilt `llama-server` is included
 in this repository. The files added to the MIT-licensed upstream tree retain
@@ -18,8 +16,8 @@ GPL-2.0-only.
 
 ## What is measured
 
-The collector publishes these legacy metrics for every CUDA device used by the
-server:
+The collector publishes these legacy metrics for each CUDA-visible device whose
+legacy CUPTI initialization succeeds:
 
 | Bank | Metrics | Unit |
 | --- | --- | --- |
@@ -35,7 +33,7 @@ The two banks are **not simultaneous**. All six `core_dram` metrics are read
 together, while the Tensor metric conflicts and uses a separate event set.
 The enabled bank remains unchanged for the entire request. Rotation occurs
 only after `active_requests` returns to zero, so the collector never mutates
-the PMU configuration during decode.
+the PMU configuration while a request is active.
 
 Consequences:
 

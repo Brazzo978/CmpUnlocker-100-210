@@ -2,9 +2,9 @@
 
 ## Gen2 result
 
-Both tested CMP100-210 endpoints were observed at PCIe Gen2 x1 after a volatile
-private research intervention. The physical link state, not merely a software
-maximum field, reported 5 GT/s and width x1.
+Both validated CMP100-210 endpoints were observed at PCIe Gen2 x1 after the
+published volatile Gen2 procedure. The physical link state, not merely a
+software maximum field, reported 5 GT/s and width x1.
 
 A pinned 32 MiB transfer test produced approximately:
 
@@ -31,8 +31,9 @@ missing board components, straps, firmware or device configuration.
 No Gen1 x16 or Gen2 x16 result is claimed. Testing a card with the missing PCIe
 coupling components populated is the next useful width experiment.
 
-## Public reproducibility boundary
+## Public reproducibility
 
-Standard PCIe state can be collected with `tools/collect_state.sh`. The script
-performs no configuration writes. The procedure used to establish the private
-experimental state is not included in this repository.
+Standard PCIe state can be collected with `tools/collect_state.sh`; that script
+performs no configuration writes. The write-capable guest helper, Proxmox
+coordinator and installation guides used for the published Gen2 procedure are
+included in this repository.

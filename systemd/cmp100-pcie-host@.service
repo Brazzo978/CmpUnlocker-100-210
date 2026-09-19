@@ -1,0 +1,9 @@
+[Unit]
+Description=Verify and apply CMP100 Gen2 for Proxmox VM %i
+After=pve-guests.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/cmp100-pcie-host %i
+TimeoutStartSec=900
+UMask=0077

@@ -1,0 +1,112 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Apply only the validated HBM 877 MHz profile to an explicit GPU UUID list.
+set -eu
+
+TOOL=/usr/local/bin/cmp100-nvml-clock
+LOCK_DIR=/run/lock/cmp100-hbm-877.lock
+APPLIED=
+SUCCESS=0
+
+say() { printf '%s\n' "cmp100-hbm-877: $*"; }
+die() { say "ERROR: $*" >&2; exit 1; }
+
+read_state() {
+    "$TOOL" telemetry --json | python3 -c '
+import json, sys
+uuid = sys.argv[1]
+data = json.load(sys.stdin)
+matches = [gpu for gpu in data.get("gpus", []) if gpu.get("uuid") == uuid]
+if len(matches) != 1:
+    raise SystemExit(2)
+gpu = matches[0]
+print(gpu["offsets"]["hbmRaw"], gpu["clocksMHz"]["memory"])
+' "$1"
+}
+
+cleanup() {
+    rc=$?
+    trap - EXIT HUP INT TERM
+    if [ "$SUCCESS" -eq 0 ] && [ -n "$APPLIED" ]; then
+        say "partial apply failed; resetting HBM on GPUs changed by this run"
+        for uuid in $APPLIED; do
+            if [ -n "${CMP100_POWER_LIMIT_WATTS:-}" ]; then
+                "$TOOL" reset --uuid "$uuid" --hbm --power --apply || true
+            else
+                "$TOOL" reset --uuid "$uuid" --hbm --apply || true
+            fi
+        done
+    fi
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+    exit "$rc"
+}
+trap cleanup EXIT HUP INT TERM
+
+[ "$(id -u)" -eq 0 ] || die 'run as root'
+for command_name in python3 stat id mkdir rmdir grep; do
+    command -v "$command_name" >/dev/null 2>&1 || die "missing command: $command_name"
+done
+[ -f "$TOOL" ] && [ ! -L "$TOOL" ] || die "missing regular binary: $TOOL"
+[ "$(stat -c '%u' "$TOOL")" -eq 0 ] || die "$TOOL is not root-owned"
+tool_mode=$(stat -c '%a' "$TOOL")
+[ $((0$tool_mode & 022)) -eq 0 ] || die "$TOOL is group/world writable"
+
+mkdir -p /run/lock
+mkdir "$LOCK_DIR" 2>/dev/null || die 'another HBM profile operation is active'
+[ -n "${CMP100_HBM_UUIDS:-}" ] || die 'set CMP100_HBM_UUIDS in /etc/default/cmp100-hbm-877'
+case "${CMP100_POWER_LIMIT_WATTS:-}" in
+    '') ;;
+    *[!0-9]*) die 'CMP100_POWER_LIMIT_WATTS must be a positive integer in watts' ;;
+    0) die 'CMP100_POWER_LIMIT_WATTS must be greater than zero' ;;
+esac
+
+seen=' '
+for uuid in $CMP100_HBM_UUIDS; do
+    printf '%s\n' "$uuid" | grep -Eq '^GPU-[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$' ||
+        die "invalid GPU UUID: $uuid"
+    case "$seen" in
+        *" $uuid "*) die "duplicate GPU UUID: $uuid" ;;
+    esac
+    seen="$seen$uuid "
+
+    # This dry run performs the strict CMP100, driver and VBIOS gates before
+    # any selected GPU is changed.
+    "$TOOL" profile --uuid "$uuid" --name hbm-877 >/dev/null
+done
+
+# The NVML offset setter is absolute, not cumulative.  Reapply the named
+# profile on every boot even when a previous service left another offset set.
+for uuid in $CMP100_HBM_UUIDS; do
+    "$TOOL" profile --uuid "$uuid" --name hbm-877 --apply
+    APPLIED="$APPLIED $uuid"
+    if [ -n "${CMP100_POWER_LIMIT_WATTS:-}" ]; then
+        "$TOOL" tune --uuid "$uuid" --watts "$CMP100_POWER_LIMIT_WATTS" --apply
+    fi
+done
+
+for uuid in $CMP100_HBM_UUIDS; do
+    state=$(read_state "$uuid") || die "cannot read final state for $uuid"
+    offset=${state%% *}
+    clock=${state##* }
+    [ "$offset" -eq 138 ] && [ "$clock" -eq 877 ] ||
+        die "$uuid verification failed: offset=$offset clock=${clock}MHz"
+    say "$uuid verified at offset +138 and 877 MHz"
+done
+
+if [ -n "${CMP100_POWER_LIMIT_WATTS:-}" ]; then
+    limits=$("$TOOL" telemetry --json | python3 -c '
+import json, sys
+expected = float(sys.argv[1])
+uuids = set(sys.argv[2:])
+data = json.load(sys.stdin)
+matched = {gpu["uuid"]: gpu["power"]["limitW"] for gpu in data.get("gpus", []) if gpu.get("uuid") in uuids}
+if set(matched) != uuids or any(value != expected for value in matched.values()):
+    raise SystemExit(2)
+print(" ".join(f"{uuid}={matched[uuid]:g}W" for uuid in sys.argv[2:]))
+' "$CMP100_POWER_LIMIT_WATTS" $CMP100_HBM_UUIDS) ||
+        die "power-limit verification failed; expected ${CMP100_POWER_LIMIT_WATTS} W"
+    say "power limits verified: $limits"
+fi
+
+SUCCESS=1
+say 'PASS'

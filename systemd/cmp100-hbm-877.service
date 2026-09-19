@@ -1,0 +1,16 @@
+[Unit]
+Description=Apply the validated CMP100 HBM 877 MHz and optional power profile
+Requisite=cmp100-tensor-unlock.service cmp100-pcie-gen2.service
+After=systemd-modules-load.service nvidia-persistenced.service cmp100-tensor-unlock.service cmp100-pcie-gen2.service
+Wants=nvidia-persistenced.service
+Before=docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/default/cmp100-hbm-877
+ExecStart=/usr/local/sbin/cmp100-hbm-877-boot
+RemainAfterExit=yes
+TimeoutStartSec=90
+
+[Install]
+WantedBy=multi-user.target

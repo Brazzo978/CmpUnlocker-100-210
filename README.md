@@ -1,26 +1,48 @@
-# NVIDIA CMP100-210 unlock and research
+# NVIDIA CMP 100-210 volatile unlock and monitoring tools
 
-Open-source experimental tooling and independently measured results for NVIDIA
-CMP100-210 (`10de:1d84`, GV100), focused on Tensor throughput and PCI Express
-link behavior.
+This repository provides experimental, volatile and fail-closed tooling for a
+narrowly validated NVIDIA CMP 100-210 target. It covers Tensor enablement,
+PCIe Gen2 retraining, headless NVML telemetry and control, terminal monitoring,
+and optional legacy-CUPTI metrics for llama.cpp.
 
-The supported procedures are volatile: they do not flash the VBIOS or program
-eFuses, and a reset or power cycle restores stock state. The repository now
-publishes the minimum operational implementation needed to reproduce the
-validated Tensor and PCIe Gen2 results. See [Disclosure boundary](DISCLOSURE.md).
+The procedures do not flash a VBIOS or program eFuses; reset or power loss
+restores stock state. Write-capable procedures are not claimed portable beyond
+the exact hardware and software gates below. See [Disclosure boundary](DISCLOSURE.md).
+
+## Hardware compatibility
+
+| Hardware | PCI device ID | Tensor path | PCIe link | HBM profile | Publication status |
+| --- | --- | --- | --- | --- | --- |
+| NVIDIA CMP 100-210 (GV100) | `10de:1d84` | Implemented and validated | Gen2 x1 implemented and validated; no Gen3 or wider-link claim | 877 MHz validated with driver `550.163.01` and VBIOS `88.00.9D.00.00` | Supported baseline |
+| Tesla V100 PCIe 16 GB (GV100GL) | `10de:1db4` | Not targeted | Not targeted | Rejected by CMP-specific write gates | Not supported |
+| Other CMP or GV100 boards | varies | Not validated | Not validated | Not validated | Not allow-listed |
+
+Read-only telemetry may return useful data on other NVML devices, but that does
+not make any write path supported. Do not bypass model, PCI-ID, firmware,
+driver, VBIOS, BDF or UUID gates.
+
+## Deployment paths
+
+| Deployment | Debian side | Proxmox side |
+| --- | --- | --- |
+| Bare metal | Install the Tensor helper, the local Gen2 helper provided by `install-pcie-guest.sh`, and the optional monitoring/HBM tools | Do not install `install-pcie-host.sh` |
+| PCI passthrough VM | Install and validate the same helpers inside the Debian guest | Optionally install `install-pcie-host.sh` on the physical Proxmox node for root/endpoint verification and QEMU Guest Agent coordinated recovery |
 
 ## Start here
 
 - [Debian 13: one-time Tensor unlock](docs/DEBIAN13-TENSOR-ONESHOT.md)
 - [Debian 13: one-time PCIe Gen2 unlock](docs/DEBIAN13-PCIE-GEN2-ONESHOT.md)
+- [Optional guest/Proxmox Gen2 automation](docs/PCIE-AUTOMATION.md)
 - [NVML telemetry, headless clocks, and gpumon](docs/NVML-TELEMETRY-AND-CLOCKS.md)
 - [Live legacy-CUPTI metrics inside Unsloth llama-server](docs/LLAMA-CUPTI-LIVE-METRICS.md)
+- [Optional coordinated boot profile](docs/DEBIAN13-BOOT-PROFILE.md)
 
-The Tensor and PCIe guides default to a single manual application. Their
-systemd units are installed but not enabled at boot. HBM telemetry and clock
-controls use the separate NVML binary, are dry-run by default, and require an
-explicit `--apply` for a device change. Use the exact tested baseline stated
-in each guide.
+The Tensor, PCIe and HBM guides default to manual application. Their systemd
+components are installed but not enabled automatically. Optional guest/Proxmox
+recovery and boot automation are separate, explicitly risky procedures with a
+documented console recovery path. HBM telemetry and clock controls use the
+separate NVML binary, are dry-run by default, and require an explicit `--apply`
+for a device change. Use the exact tested baseline stated in each guide.
 
 ## Results
 
@@ -32,8 +54,8 @@ in each guide.
 | PCIe width | **Still open** | Both tested cards remained x1, including behind Gen3 x8- and Gen3 x16-capable upstream paths; no x16 result is claimed |
 | NVML telemetry and HBM control | **Working on the tested baseline** | Headless NVML reads HBM temperature, 85 C threshold, clocks, power, memory and PCIe state; a UUID-targeted raw HBM offset of +138 read back as 877 MHz on the tested cards |
 
-The interventions used during the private experiment were volatile. Resetting
-or power-cycling restored the stock state.
+All published interventions are volatile. Resetting or power-cycling restores
+the stock state.
 
 ## Evidence
 
@@ -65,10 +87,11 @@ Operational components:
 - `tools/gpumon_v3_llama.c` is the terminal NVML monitor source, including
   HBM temperature/threshold, clock-event reporting and schema-3 CUPTI input;
 - `install-monitoring.sh` builds and installs the Rust NVML helper and
-  `gpumon` without changing GPU settings;
-- the Tensor and PCIe systemd units provide bounded manual execution and
-  optional boot integration. The tutorials do not enable them automatically;
-  the NVML controls are not enabled or reapplied automatically.
+  `gpumon`, plus a disabled HBM boot unit, without changing GPU settings;
+- the Tensor, PCIe and HBM systemd units provide bounded manual execution and
+  optional boot integration. No installer enables them automatically;
+- the optional Proxmox coordinator verifies the physical root and endpoint
+  links and invokes the guest helper through QEMU Guest Agent only when needed.
 
 Validation components:
 
@@ -78,17 +101,13 @@ Validation components:
 - `tools/check_public_boundary.py` enforces an exact public file allowlist and
   rejects secrets, firmware blobs and unreviewed laboratory files.
 
-## Tested environment
+## Validated software baseline
 
-- two NVIDIA CMP100-210 GPUs (`10de:1d84`);
+- NVIDIA CMP 100-210 (`10de:1d84`);
 - NVIDIA driver `550.163.01`;
-- CUDA `12.4` and PyTorch `2.6.0+cu124` for the captured Tensor run;
-- Debian GNU/Linux 13 for the final bare-metal/guest validation;
-- HPE ProLiant DL380 Gen9 test platform;
-- independent upstream paths capable of Gen3 x8 and Gen3 x16.
-
-The platform also operated an NVMe device at Gen3 x4 on the relevant riser, so
-the common CMP link limit was not attributed to a server-wide Gen1/Gen2 cap.
+- VBIOS `88.00.9D.00.00` for the named HBM profile;
+- CUDA `12.4` and PyTorch `2.6.0+cu124` for the captured Tensor result;
+- Debian GNU/Linux 13 for bare-metal and PCI-passthrough guest operation.
 
 ## Safety and scope
 

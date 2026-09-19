@@ -27,6 +27,10 @@ Or build and install both tools without changing any GPU setting:
 sudo ./install-monitoring.sh
 ```
 
+The installer also places `cmp100-hbm-877.service`, but does not start or
+enable it. Complete the manual validation here before considering the
+[optional boot profile](DEBIAN13-BOOT-PROFILE.md).
+
 The source only calls NVML. It deliberately has no Xorg/NV-CONTROL, Nouveau,
 raw BAR, VBIOS, firmware, or kernel-module path.
 
@@ -113,6 +117,51 @@ the validated `+138` value, requires the tested CMP100-210 identity, driver and
 VBIOS by default, reads the offset back, and verifies an effective 877 MHz
 memory clock. A failed setter, readback or clock verification returns non-zero
 and triggers a best-effort rollback.
+
+For unattended use, `cmp100-hbm-877.service` can also apply an optional power
+limit from `/etc/default/cmp100-hbm-877`:
+
+```bash
+CMP100_HBM_UUIDS="GPU-... GPU-..."
+# Optional; uncomment only after validating the desired value manually.
+# CMP100_POWER_LIMIT_WATTS=150
+```
+
+The service uses the Rust NVML setter directly, applies the same absolute limit
+to each allow-listed UUID, checks the per-device NVML range and verifies the
+final value. The option is commented and inactive in a new installation.
+
+The tested cards reported a stock 810 MHz maximum and repeatedly operated at
+877 MHz with this profile. That result is evidence for those cards, not a
+guarantee for every GV100 board or HBM2 device. Different memory binning, board
+power and cooling remain the operator's risk; the boot unit intentionally does
+not expose arbitrary offsets.
+
+### Experimental HBM offset map
+
+The following effective bins were observed during manual validation on the same
+two cards. They are published as experimental data, not as safe
+profiles or boot recommendations. The driver quantizes several raw offsets to
+the same effective clock:
+
+| Raw HBM offset | Observed effective clock |
+| ---: | ---: |
+| `0` | 810 MHz (stock CMP/firmware operating point) |
+| `138` | 877 MHz |
+| `184` | 891 MHz |
+| `200..212` | 904 MHz |
+| `214..240` | 918 MHz |
+| `242..266` | 931 MHz |
+| `268..294` | 945 MHz |
+| `296..320` | 958 MHz |
+| `322..348` | 972 MHz |
+| `350..374` | 985 MHz |
+| `376..382` | 999 MHz |
+
+Only offset `138` / 877 MHz has a named, identity-gated profile and boot unit.
+Higher bins require deliberate manual `tune`, temperature/error monitoring and
+independent stability testing. A successful clock readback alone does not prove
+data integrity or long-duration stability.
 
 Advanced settings remain explicit but can be previewed together as one
 transaction:

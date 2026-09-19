@@ -1,0 +1,11 @@
+[Unit]
+Description=Check CMP100 PCIe state for Proxmox VM %i
+
+[Timer]
+OnBootSec=45s
+OnUnitInactiveSec=60s
+AccuracySec=5s
+Unit=cmp100-pcie-host@%i.service
+
+[Install]
+WantedBy=timers.target

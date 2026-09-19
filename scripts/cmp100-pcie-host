@@ -1,0 +1,248 @@
+#!/usr/bin/env python3
+"""Credential-free Proxmox coordinator for the tested GV100 Gen2 sequence."""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import struct
+import subprocess
+import sys
+import time
+
+BDF = re.compile(r"0000:[0-9a-fA-F]{2}:[0-1][0-9a-fA-F]\.[0-7]\Z")
+GUEST_BDF = re.compile(r"0000:[0-9a-fA-F]{2}:00\.0\Z")
+
+
+def log(message, **fields):
+    print(json.dumps({"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                      "message": message, **fields}), flush=True)
+
+
+def command(args, timeout=35):
+    result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    if result.returncode:
+        raise RuntimeError(f"{args[0]} failed: {result.stderr.strip()[:1000]}")
+    return result.stdout
+
+
+def validate_config(data, vmid):
+    if set(data) - {"vmid", "devices"} or data.get("vmid") != vmid:
+        raise ValueError("config vmid mismatch or unknown keys")
+    devices = data.get("devices")
+    if not isinstance(devices, list) or not 1 <= len(devices) <= 8:
+        raise ValueError("configure between one and eight explicit CMP100 pairs")
+    for item in devices:
+        if set(item) != {"host", "guest"} or not BDF.fullmatch(item["host"]) or not GUEST_BDF.fullmatch(item["guest"]):
+            raise ValueError("invalid host/guest BDF pair")
+    for side in ("host", "guest"):
+        if len({item[side].lower() for item in devices}) != len(devices):
+            raise ValueError("duplicate device mapping")
+    return [{side: item[side].lower() for side in ("host", "guest")} for item in devices]
+
+
+class PCI:
+    def __init__(self, bdf, writable=False):
+        self.bdf = bdf
+        self.path = Path("/sys/bus/pci/devices") / bdf
+        self.fd = os.open(self.path / "config", os.O_RDWR if writable else os.O_RDONLY)
+        cap = self.read(0x34, 1) & 0xfc
+        seen = set()
+        while cap and cap not in seen and len(seen) < 48:
+            seen.add(cap)
+            if self.read(cap, 1) == 0x10:
+                self.exp = cap
+                break
+            cap = self.read(cap + 1, 1) & 0xfc
+        else:
+            self.close()
+            raise RuntimeError(f"{bdf}: no PCIe capability")
+
+    def read(self, offset, size=2):
+        value = os.pread(self.fd, size, offset)
+        if len(value) != size:
+            raise RuntimeError(f"{self.bdf}: short config read")
+        return int.from_bytes(value, "little")
+
+    def write(self, offset, value):
+        if os.pwrite(self.fd, struct.pack("<H", value), offset) != 2:
+            raise RuntimeError("short PCI configuration write")
+
+    def status(self):
+        value = self.read(self.exp + 0x12)
+        if value == 0xffff:
+            raise RuntimeError(f"{self.bdf}: endpoint unavailable")
+        return {"bdf": self.bdf, "raw": f"0x{value:04x}", "generation": value & 15,
+                "width": (value >> 4) & 63, "training": bool(value & 0x800)}
+
+    def aer(self):
+        offset, seen = 0x100, set()
+        while offset and offset not in seen and len(seen) < 256:
+            seen.add(offset)
+            header = self.read(offset, 4)
+            if header in (0, 0xffffffff):
+                break
+            if header & 0xffff == 1:
+                return {"uncorrectable": self.read(offset + 4, 4),
+                        "correctable": self.read(offset + 0x10, 4)}
+            offset = (header >> 20) & 0xffc
+        return None
+
+    def close(self):
+        os.close(self.fd)
+
+
+def settled_gen2(status):
+    return status["generation"] == 2 and status["width"] >= 1 and not status["training"]
+
+
+def guest_exec(vmid, args, timeout=240):
+    start = json.loads(command(["qm", "guest", "exec", str(vmid), "--synchronous", "0", "--", *args]))
+    pid = start["pid"]
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        state = json.loads(command(["qm", "guest", "exec-status", str(vmid), str(pid)]))
+        if state.get("exited"):
+            if state.get("exitcode") != 0:
+                raise RuntimeError(f"guest exit {state.get('exitcode')}: "
+                                   f"{state.get('err-data', '')[-2000:]} {state.get('out-data', '')[-3000:]}")
+            return state.get("out-data", "")
+        time.sleep(1)
+    raise TimeoutError(f"guest command PID {pid} exceeded {timeout}s; inspect guest before retrying")
+
+
+def atomic_state(path, data):
+    temp = path.with_suffix(".tmp")
+    temp.write_text(json.dumps(data, indent=2) + "\n")
+    os.chmod(temp, 0o600)
+    temp.replace(path)
+
+
+def run(args):
+    if os.geteuid() != 0:
+        raise RuntimeError("run as root on the physical Proxmox node")
+    config = Path(args.config or f"/etc/cmp100-pcie/{args.vmid}.json")
+    stat = config.stat()
+    if stat.st_uid != 0 or stat.st_mode & 0o022:
+        raise RuntimeError("configuration must be root-owned and not group/world writable")
+    devices = validate_config(json.loads(config.read_text()), args.vmid)
+    if command(["qm", "status", str(args.vmid)]).strip() != "status: running":
+        log("VM is stopped; no action")
+        return 0
+    vmconfig = command(["qm", "config", str(args.vmid), "--current", "1"])
+    assigned = set()
+    for line in vmconfig.splitlines():
+        if re.match(r"hostpci\d+:", line):
+            address = line.split(": ", 1)[1].split(",", 1)[0]
+            assigned.add(address if address.startswith("0000:") else "0000:" + address)
+    opened, pairs = [], []
+    statepath = Path(f"/var/lib/cmp100-pcie-host/{args.vmid}.json")
+    boot_id = None
+    try:
+        for item in devices:
+            if item["host"] not in assigned:
+                raise RuntimeError(f"{item['host']} is not assigned to VM {args.vmid}")
+            endpoint = PCI(item["host"])
+            opened.append(endpoint)
+            if endpoint.read(0) != 0x10de or endpoint.read(2) != 0x1d84:
+                raise RuntimeError("only 10de:1d84 CMP100 is supported")
+            if (endpoint.path / "driver").resolve().name != "vfio-pci":
+                raise RuntimeError(f"{endpoint.bdf} must belong to vfio-pci")
+            root_bdf = endpoint.path.resolve().parent.name
+            if not BDF.fullmatch(root_bdf):
+                raise RuntimeError("endpoint does not have a direct PCI upstream port")
+            root = PCI(root_bdf)
+            opened.append(root)
+            if (root.read(root.exp + 2) >> 4) & 15 not in (4, 6):
+                raise RuntimeError("upstream function is not a root/downstream PCIe port")
+            if root.read(root.exp + 0xc) & 15 < 2:
+                raise RuntimeError("upstream port does not advertise Gen2")
+            pairs.append((root, endpoint))
+        states = [device.status() for pair in pairs for device in pair]
+        log("Physical link inventory", links=states)
+        previous = json.loads(statepath.read_text()) if statepath.exists() else {}
+        if all(settled_gen2(value) for value in states) and not previous.get("failed_boot"):
+            log("Already Gen2 on both sides of every link; no guest or register mutation")
+            return 0
+        if args.check:
+            return 1
+        # Readiness commands are read-only. Never repeatedly detach workloads after a failed boot.
+        deadline = time.monotonic() + 180
+        while True:
+            try:
+                boot_id = guest_exec(args.vmid, ["cat", "/proc/sys/kernel/random/boot_id"], 15).strip()
+                if not re.fullmatch(r"[0-9a-f-]{36}", boot_id):
+                    raise RuntimeError("invalid guest boot identifier")
+                break
+            except (RuntimeError, subprocess.TimeoutExpired, TimeoutError):
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(3)
+        if previous.get("failed_boot") == boot_id and not args.retry:
+            log("Previous attempt failed during this guest boot; explicit --retry required")
+            return 1
+        before_aer = [device.aer() for pair in pairs for device in pair]
+        atomic_state(statepath, {"failed_boot": boot_id, "status": "in-progress"})
+        for root, _ in pairs:
+            if root.read(root.exp + 0x30) & 15 < 2:
+                raise RuntimeError("upstream target is below Gen2; configure the physical port before enabling automation")
+        # Both host ports in the verified setup retain target Gen3. No root
+        # configuration writes are needed for the endpoint directed Gen2 change.
+        # Serialize with the boot service before issuing a helper through QGA.
+        guest_exec(args.vmid, ["/bin/systemctl", "start", "cmp100-tensor-unlock.service"], 300)
+        pending = [item for item, pair in zip(devices, pairs)
+                   if not all(settled_gen2(device.status()) for device in pair)]
+        output = guest_exec(args.vmid, ["/usr/bin/timeout", "--signal=TERM", "--kill-after=45", "420",
+                            "/usr/bin/env",
+                            "CMP100_PCIE_BDFS=" + " ".join(x["guest"] for x in (pending or devices)),
+                            "/usr/local/sbin/cmp100-pcie-gen2"], 500)
+        log("Guest helper completed", output=output[-12000:])
+        states = [device.status() for pair in pairs for device in pair]
+        if not all(settled_gen2(value) for value in states):
+            raise RuntimeError("guest completed but physical Gen2 was not verified at both ends")
+        after_aer = [device.aer() for pair in pairs for device in pair]
+        for before, after in zip(before_aer, after_aer):
+            if before is not None and after is not None and after["uncorrectable"] & ~before["uncorrectable"]:
+                raise RuntimeError("new uncorrectable PCIe AER status")
+        atomic_state(statepath, {"status": "pass", "guest_boot": boot_id, "links": states,
+                                "aer": after_aer})
+        log("PASS: physical Gen2 verified on all configured roots and endpoints", links=states, aer=after_aer)
+        return 0
+    except Exception as error:
+        if boot_id is not None:
+            atomic_state(statepath, {"failed_boot": boot_id, "status": "failed", "error": str(error)})
+        raise
+    finally:
+        for device in opened:
+            device.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("vmid", type=int)
+    parser.add_argument("--config")
+    parser.add_argument("--check", action="store_true", help="read-only physical link validation")
+    parser.add_argument("--retry", action="store_true", help="allow retry after a failed attempt in this guest boot")
+    args = parser.parse_args()
+    if not 100 <= args.vmid <= 999999999:
+        parser.error("VMID out of range")
+    Path("/run/lock").mkdir(exist_ok=True)
+    Path("/var/lib/cmp100-pcie-host").mkdir(mode=0o700, parents=True, exist_ok=True)
+    with open(f"/run/lock/cmp100-pcie-host-{args.vmid}.lock", "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            log("Coordinator already running; no action")
+            return 0
+        try:
+            return run(args)
+        except Exception as error:
+            log("FAIL", error=str(error))
+            return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

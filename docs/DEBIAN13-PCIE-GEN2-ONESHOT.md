@@ -80,7 +80,10 @@ PASS; cleanup completed
 A successful signed-write message alone is not enough: the final PASS also
 means the driver was restored and the reported link state passed validation.
 
-Do **not** run `systemctl enable cmp100-pcie-gen2.service` for a one-time setup.
+Do **not** enable this unit for a one-time setup. For a Debian guest with PCI
+passthrough, follow the separate [guest/Proxmox automation guide](PCIE-AUTOMATION.md).
+For coordinated guest boot ordering with Tensor and HBM, also read the
+[optional boot-profile guide](DEBIAN13-BOOT-PROFILE.md).
 
 ## 5. Verify both the driver and PCIe state
 
@@ -90,12 +93,14 @@ sudo lspci -vv -s 0000:01:00.0 | grep -E 'LnkCap:|LnkSta:'
 ```
 
 The validated result is current/max generation `2/2` and `LnkSta` speed
-`5GT/s`. Width is expected to remain `x1` on the currently tested boards.
+`5GT/s`. The validated reference cards remained at width `x1`; this procedure
+does not claim a wider link.
 
 In a passthrough VM, also verify the physical endpoint and its upstream port
 from the hypervisor. A guest-visible success should not be substituted for
 physical-link evidence. This simple one-time guide does not install the
-optional Proxmox monitoring/recovery coordinator used in the research lab.
+optional Proxmox monitoring/recovery coordinator described in
+[PCIE-AUTOMATION.md](PCIE-AUTOMATION.md).
 
 ## Recovery and re-running
 

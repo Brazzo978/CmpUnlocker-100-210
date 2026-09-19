@@ -127,8 +127,10 @@ tensor_409664=0x00000888
 unlock and NVIDIA handoff PASS
 ```
 
-`nvidia-smi` must list every card again. Do **not** run
-`systemctl enable cmp100-tensor-unlock.service` for a one-time setup.
+`nvidia-smi` must list every card again. Do **not** enable this unit for a
+one-time setup. Only after every manual stage passes, follow the separate
+[optional boot-profile guide](DEBIAN13-BOOT-PROFILE.md) with an out-of-band
+recovery console available.
 
 ## 5. Optional Tensor verification
 

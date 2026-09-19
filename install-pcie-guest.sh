@@ -92,5 +92,5 @@ echo 'After stopping GPU workloads, run:'
 echo '  sudo systemctl start cmp100-pcie-gen2.service'
 echo '  sudo journalctl -u cmp100-pcie-gen2.service -b --no-pager'
 echo
-echo 'Enable only after a successful manual run:'
-echo '  sudo systemctl enable cmp100-pcie-gen2.service'
+echo 'For guest boot and Proxmox recovery integration, follow'
+echo 'docs/DEBIAN13-BOOT-PROFILE.md and docs/PCIE-AUTOMATION.md.'
