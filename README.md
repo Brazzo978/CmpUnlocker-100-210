@@ -11,15 +11,20 @@ the exact hardware and software gates below. See [Disclosure boundary](DISCLOSUR
 
 ## Hardware compatibility
 
-| Hardware | PCI device ID | Tensor path | PCIe link | HBM profile | Publication status |
-| --- | --- | --- | --- | --- | --- |
-| NVIDIA CMP 100-210 (GV100) | `10de:1d84` | Implemented and validated | Gen2 x1 implemented and validated; no Gen3 or wider-link claim | 877 MHz validated with driver `550.163.01` and VBIOS `88.00.9D.00.00` | Supported baseline |
-| Tesla V100 PCIe 16 GB (GV100GL) | `10de:1db4` | Not targeted | Not targeted | Rejected by CMP-specific write gates | Not supported |
-| Other CMP or GV100 boards | varies | Not validated | Not validated | Not validated | Not allow-listed |
+| PCI device ID | Shipped identity | Known unlock or conversion | Reference |
+| --- | --- | --- | --- |
+| `10de:1d84` | CMP 100-210, PG500 SKU 110 | Unlocked variant: Tensor, PCIe Gen2 and HBM 877 MHz | **This repository** |
+| `10de:1df4` | CMP 100-210, PG500 SKU 111 | Strap mod to Tesla V100; a complete software unlock is also documented | [duggasco/CMP100-210](https://github.com/duggasco/CMP100-210) |
+| `10de:1dc1` | CMP 100-200 | Strap mod to Titan V | External hardware modification |
+| `10de:1db4` | Tesla V100 PCIe 16 GB | Already a V100; no CMP restriction to lift | Reference identity |
+| other | Other CMP or GV100 board | Not validated by this project | Not allow-listed |
 
-Read-only telemetry may return useful data on other NVML devices, but that does
-not make any write path supported. Do not bypass model, PCI-ID, firmware,
-driver, VBIOS, BDF or UUID gates.
+Only the `10de:1d84` software path is implemented by this repository. The
+`1df4` link points to an independent project, while both strap-mod entries are
+hardware conversions rather than features of this code. Read-only telemetry
+may return useful data on other NVML devices, but that does not make any write
+path supported. Do not bypass model, PCI-ID, firmware, driver, VBIOS, BDF or
+UUID gates.
 
 ## Deployment paths
 
