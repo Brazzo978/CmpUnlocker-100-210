@@ -14,6 +14,7 @@ validated Tensor and PCIe Gen2 results. See [Disclosure boundary](DISCLOSURE.md)
 - [Debian 13: one-time Tensor unlock](docs/DEBIAN13-TENSOR-ONESHOT.md)
 - [Debian 13: one-time PCIe Gen2 unlock](docs/DEBIAN13-PCIE-GEN2-ONESHOT.md)
 - [NVML telemetry, headless clocks, and gpumon](docs/NVML-TELEMETRY-AND-CLOCKS.md)
+- [Live legacy-CUPTI metrics inside Unsloth llama-server](docs/LLAMA-CUPTI-LIVE-METRICS.md)
 
 The Tensor and PCIe guides default to a single manual application. Their
 systemd units are installed but not enabled at boot. HBM telemetry and clock
@@ -40,6 +41,7 @@ or power-cycling restored the stock state.
 - [PCIe Gen2 and width measurements](docs/PCIE-RESULTS.md)
 - [Gen3 negative result](docs/GEN3-LIMIT.md)
 - [NVML telemetry, headless clocks, and gpumon](docs/NVML-TELEMETRY-AND-CLOCKS.md)
+- [Live CUPTI metrics and reproducible Unsloth patch](docs/LLAMA-CUPTI-LIVE-METRICS.md)
 - [Test methodology and limitations](docs/METHODOLOGY.md)
 - [Captured Tensor benchmark output](results/tensor-benchmark.txt)
 - [Evidence checksums](results/SHA256SUMS)
@@ -56,8 +58,14 @@ Operational components:
   fail-closed, volatile operations;
 - `tools/cmp100-nvml-clock-v2.rs` is the headless NVML telemetry/control
   source; controls are UUID-targeted and dry-run unless `--apply` is supplied;
+- `tools/cupti_legacy_probe.c` is the non-mutating compatibility probe for a
+  locally installed legacy-capable CUPTI library;
+- `patches/llama.cpp/0001-server-add-optional-legacy-CUPTI-metric-collector.patch`
+  is the pinned, optional Unsloth `llama-server` instrumentation patch;
 - `tools/gpumon_v3_llama.c` is the terminal NVML monitor source, including
-  HBM temperature/threshold and clock-event reporting;
+  HBM temperature/threshold, clock-event reporting and schema-3 CUPTI input;
+- `install-monitoring.sh` builds and installs the Rust NVML helper and
+  `gpumon` without changing GPU settings;
 - the Tensor and PCIe systemd units provide bounded manual execution and
   optional boot integration. The tutorials do not enable them automatically;
   the NVML controls are not enabled or reapplied automatically.

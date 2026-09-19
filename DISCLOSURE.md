@@ -17,6 +17,8 @@ separated from the broader private laboratory repository.
 - fail-closed Tensor and PCIe Gen2 runtime helpers;
 - installation scripts, oneshot units and one-time Debian 13 tutorials;
 - the headless NVML telemetry/control source and HBM-aware terminal monitor;
+- the non-mutating CUPTI capability probe and pinned optional `llama-server`
+  instrumentation patch, without NVIDIA libraries or prebuilt llama binaries;
 - hashes of the published evidence.
 
 ## Still withheld

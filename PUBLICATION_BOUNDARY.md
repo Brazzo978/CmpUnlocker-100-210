@@ -14,6 +14,8 @@ Allowed categories:
 - evidence checksums.
 - reviewed source and scripts required by the supported Tensor/Gen2 release
   and the bounded, volatile V100-like HBM clock procedure;
+- the reviewed CUPTI capability probe, pinned source patch and reproduction
+  guide; no NVIDIA CUPTI library or prebuilt llama binary;
 - exact-firmware builders that distribute no proprietary firmware blob;
 - bounded, fail-closed installers and oneshot units.
 

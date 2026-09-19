@@ -15,33 +15,46 @@ Install a Rust compiler plus the NVIDIA driver development files. On Debian:
 ```bash
 sudo apt install rustc build-essential libnvidia-ml-dev libncurses-dev \
   libcurl4-openssl-dev libjson-c-dev libsystemd-dev
-rustc -O tools/cmp100-nvml-clock-v2.rs -o cmp100-nvml-clock-v2 -l nvidia-ml
+rustc --edition=2021 -O tools/cmp100-nvml-clock-v2.rs \
+  -o cmp100-nvml-clock-v2 -l nvidia-ml
 gcc -O2 -Wall -Wextra -Wpedantic -o gpumon tools/gpumon_v3_llama.c \
-  -lnvidia-ml -lncurses -lcurl -ljson-c -lsystemd -lm
+  -lnvidia-ml -lncursesw -lcurl -ljson-c -lsystemd -lm
+```
+
+Or build and install both tools without changing any GPU setting:
+
+```bash
+sudo ./install-monitoring.sh
 ```
 
 The source only calls NVML. It deliberately has no Xorg/NV-CONTROL, Nouveau,
 raw BAR, VBIOS, firmware, or kernel-module path.
 
-## Optional CUPTI 11.4 capability probe
+## Optional legacy-CUPTI capability probe
 
 Recent CUPTI versions reject CMP devices for legacy event collection. The
 source `tools/cupti_legacy_probe.c` is a non-collecting compatibility probe
-for an already installed CUPTI 11.4 library. It creates no event group and
-does not attach to an inference process; it only enumerates event domains and
-metric names. Build it against the exact CUPTI 11.4 path on the host:
+for an already installed legacy-capable CUPTI library. It creates no event
+group and does not attach to an inference process; it reports the runtime and
+compile API versions and enumerates event domains and metric names for every
+CUDA device. Build it against the exact header/library pairing on the host:
 
 ```bash
-gcc -O2 -I/usr/include tools/cupti_legacy_probe.c -o cupti-legacy-probe \
+gcc -O2 -Wall -Wextra -Wpedantic -Werror \
+  -I/path/to/headers tools/cupti_legacy_probe.c -o cupti-legacy-probe \
   /path/to/libcupti.so.11.4 -lcuda
-LD_LIBRARY_PATH=/path/to /path/to/cupti-legacy-probe
+LD_LIBRARY_PATH=/directory/containing/library ./cupti-legacy-probe
 ```
 
-On the tested CMP100/driver-550 baseline, this returned six event domains and
-176 legacy metrics, including Tensor functional-unit utilization and DRAM
-read/write counters. This does not make a system-wide monitor: legacy CUPTI
-collects counters for its own CUDA context. Integrating live inference metrics
-needs instrumentation of that workload and should be tested separately.
+On the tested CMP100/driver-550 baseline, the library shipped with Nsight
+Systems 2024.6.2 returned six event domains and 176 legacy metrics on both
+GPUs, including Tensor functional-unit utilization and DRAM read/write
+counters. Its `.11.4` SONAME does not mean that CUDA Toolkit 11.4 must replace
+the host toolkit. No NVIDIA library is distributed here.
+
+The pinned optional `llama-server` patch instruments the workload's own CUDA
+contexts and publishes those metrics for `gpumon`. See
+[Live CUPTI metrics inside Unsloth llama-server](LLAMA-CUPTI-LIVE-METRICS.md).
 
 ## Read-only telemetry
 
@@ -59,12 +72,72 @@ it never silently maps a failed field to zero. `samples` returns NVML historic
 sample streams. `processes` returns compute/graphics PIDs and NVML-attributed
 VRAM usage.
 
-`gpumon` is the lightweight terminal view. The useful CMP100 fields are GPU
+`gpumon` is the lightweight terminal view. The useful NVML fields are GPU
 and memory-controller utilization, VRAM, HBM clock, HBM temperature and its
 85 C threshold, power, PCIe state and clock-event reasons. NVML memory
-utilization is controller activity, not measured HBM GB/s. NVML/CUPTI on this
-CMP configuration does not provide Tensor Core utilization or real DRAM
-read/write bandwidth; do not label a proxy as either.
+utilization is controller activity, not measured HBM GB/s. External NVML does
+not provide Tensor utilization or real HBM read/write bandwidth on this CMP
+configuration. The optional instrumented legacy-CUPTI path does provide the
+documented counters, in two non-simultaneous banks; it is not an NVML proxy.
+
+In `gpumon`, press `c` to switch between the compact GPU page and detailed
+CUPTI state. `LIVE` is a current sample, `HOLD` is retained history while the
+server or bank is idle, and `STALE` means an enabled bank has not produced a
+fresh sample within the expected interval. JSON consumers should use each
+sample's `state`, `current`, `bank`, `sampledAtUnixMs`, `ageMs`, and `unit`.
+Per-device CUPTI data is matched to NVML by PCI bus ID; it is never silently
+assigned by list position on a multi-GPU system.
+
+## Simple settings workflow
+
+`gpumon` deliberately stays read-only. Keeping privileged writes in the Rust
+helper avoids password prompts inside ncurses and makes every requested change
+auditable as a JSON transaction. The normal workflow is:
+
+```bash
+# 1. Copy the UUID shown for the intended card.
+cmp100-nvml-clock list
+
+# 2. Inspect both cards and the current effective HBM clock.
+cmp100-nvml-clock status --json
+
+# 3. Preview the validated 877 MHz HBM profile for one UUID.
+cmp100-nvml-clock profile --uuid GPU-... --name hbm-877
+
+# 4. Apply only after reviewing the preview.
+sudo cmp100-nvml-clock profile --uuid GPU-... --name hbm-877 --apply
+```
+
+The `hbm-877` profile is the easy path: it changes only the HBM raw offset to
+the validated `+138` value, requires the tested CMP100-210 identity, driver and
+VBIOS by default, reads the offset back, and verifies an effective 877 MHz
+memory clock. A failed setter, readback or clock verification returns non-zero
+and triggers a best-effort rollback.
+
+Advanced settings remain explicit but can be previewed together as one
+transaction:
+
+```bash
+cmp100-nvml-clock tune --uuid GPU-... \
+  --hbm-offset 138 --core-offset 0 --watts 120 --allow-out-of-range
+
+sudo cmp100-nvml-clock tune --uuid GPU-... \
+  --hbm-offset 138 --core-offset 0 --watts 120 \
+  --allow-out-of-range --apply
+```
+
+`tune` validates every supplied value before the first write. Power is checked
+against the live NVML constraints. The driver-reported clock-offset limits on
+CMP100 can be unreliable, so a value outside them is rejected unless the user
+also supplies the conspicuous `--allow-out-of-range` override. If a later
+write fails, already changed settings are rolled back in reverse order.
+
+Reset only the settings you select; power returns to the NVML default:
+
+```bash
+cmp100-nvml-clock reset --uuid GPU-... --hbm --core --power
+sudo cmp100-nvml-clock reset --uuid GPU-... --hbm --core --power --apply
+```
 
 ## Controls are dry-run first
 
@@ -76,15 +149,11 @@ nvidia-smi --query-gpu=index,uuid,name --format=csv
 ```
 
 ```bash
-./cmp100-nvml-clock-v2 set-power-limit \
-  --uuid GPU-... --watts 120
-./cmp100-nvml-clock-v2 set-hbm-offset \
-  --uuid GPU-... --raw-offset 138
-./cmp100-nvml-clock-v2 set-core-offset \
-  --uuid GPU-... --raw-offset 0
+./cmp100-nvml-clock-v2 tune --uuid GPU-... --watts 120
+./cmp100-nvml-clock-v2 tune --uuid GPU-... --core-offset 0
 ```
 
-Appending `--apply` performs exactly one NVML setter call followed by a
+Appending `--apply` performs the validated transaction followed by exact
 readback. Setters may require `sudo` or root. Use them only on hardware you
 own, with recovery access, after a stable baseline. An offset is a raw NVML
 VF value, not MHz. The observed
@@ -95,8 +164,8 @@ and maximum constraints.
 Example deliberate change:
 
 ```bash
-./cmp100-nvml-clock-v2 set-hbm-offset \
-  --uuid GPU-... --raw-offset 138 --apply
+sudo ./cmp100-nvml-clock-v2 profile \
+  --uuid GPU-... --name hbm-877 --apply
 ```
 
 Verify after every change:
@@ -114,8 +183,7 @@ workload first.
 To undo an offset, deliberately set its raw value to zero:
 
 ```bash
-sudo ./cmp100-nvml-clock-v2 set-hbm-offset --uuid GPU-... --raw-offset 0 --apply
-sudo ./cmp100-nvml-clock-v2 set-core-offset --uuid GPU-... --raw-offset 0 --apply
+sudo ./cmp100-nvml-clock-v2 reset --uuid GPU-... --hbm --core --apply
 ```
 
 This repository publishes source and build instructions, not prebuilt

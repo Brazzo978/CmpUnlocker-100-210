@@ -1,0 +1,1180 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 730d5561..5a33584f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -137,6 +137,10 @@ option(LLAMA_BUILD_APP       "llama: build the unified binary"
+ option(LLAMA_BUILD_UI        "llama: build the embedded Web UI for server"                                       ON)
+ option(LLAMA_USE_PREBUILT_UI "llama: use prebuilt UI from HF Bucket when available (requires LLAMA_BUILD_UI=ON)" ON)
+ 
++# Optional legacy CUPTI support for CMP devices. It is off unless the build
++# explicitly receives an isolated CUPTI include directory and shared library.
++option(LLAMA_CUPTI_LEGACY "llama-server: enable legacy CUPTI metric collector" OFF)
++
+ option(LLAMA_TOOLS_INSTALL "llama: install tools" ${LLAMA_TOOLS_INSTALL_DEFAULT})
+ option(LLAMA_TESTS_INSTALL "llama: install tests" ON)
+ 
+diff --git a/tools/server/CMakeLists.txt b/tools/server/CMakeLists.txt
+index 280bd9e1..c5fbff8c 100644
+--- a/tools/server/CMakeLists.txt
++++ b/tools/server/CMakeLists.txt
+@@ -44,6 +44,27 @@ add_library(${TARGET}
+     server-models.cpp
+     server-models.h
+ )
++
++if (LLAMA_CUPTI_LEGACY)
++    set(LLAMA_CUPTI_INCLUDE_DIR "" CACHE PATH "Directory containing legacy CUPTI headers")
++    set(LLAMA_CUPTI_LIBRARY "" CACHE FILEPATH "Path to the legacy libcupti shared library")
++
++    if (NOT LLAMA_CUPTI_INCLUDE_DIR OR NOT EXISTS "${LLAMA_CUPTI_INCLUDE_DIR}/cupti.h")
++        message(FATAL_ERROR "LLAMA_CUPTI_LEGACY requires -DLLAMA_CUPTI_INCLUDE_DIR=<directory containing cupti.h>")
++    endif()
++    if (NOT LLAMA_CUPTI_LIBRARY OR NOT EXISTS "${LLAMA_CUPTI_LIBRARY}")
++        message(FATAL_ERROR "LLAMA_CUPTI_LEGACY requires -DLLAMA_CUPTI_LIBRARY=<path to libcupti.so.11.4>")
++    endif()
++
++    find_library(LLAMA_CUPTI_DRIVER_LIBRARY NAMES cuda REQUIRED)
++    get_filename_component(LLAMA_CUPTI_LIBRARY_DIR "${LLAMA_CUPTI_LIBRARY}" DIRECTORY)
++    target_sources(${TARGET} PRIVATE server-cupti.cpp server-cupti.h)
++    target_compile_definitions(${TARGET} PRIVATE LLAMA_CUPTI_LEGACY=1)
++    target_include_directories(${TARGET} PRIVATE "${LLAMA_CUPTI_INCLUDE_DIR}")
++    target_link_libraries(${TARGET} PRIVATE "${LLAMA_CUPTI_LIBRARY}" "${LLAMA_CUPTI_DRIVER_LIBRARY}")
++    set_property(TARGET ${TARGET} APPEND PROPERTY BUILD_RPATH "${LLAMA_CUPTI_LIBRARY_DIR}")
++endif()
++
+ set_target_properties(${TARGET} PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+ 
+ target_include_directories(${TARGET} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index a9edbd7b..40be8586 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -803,6 +803,7 @@ public:
+     server_chat_params chat_params;
+ 
+     server_state_callback_t callback_state = [](server_state, json) -> void {};
++    server_request_activity_callback_t callback_request_activity = [](bool) -> void {};
+ 
+     server_context_impl() {
+         mtmd_helper_log_set(common_log_default_callback, nullptr);
+@@ -1219,6 +1220,7 @@ private:
+ 
+             slot.callback_on_release = [this](int id_slot) {
+                 queue_tasks.pop_deferred_task(id_slot);
++                callback_request_activity(false);
+             };
+ 
+             slot.callback_on_reset = [this](const server_slot & slot) {
+@@ -1723,6 +1725,10 @@ private:
+             ? SLOT_STATE_WAIT_OTHER // wait for the parent to process prompt
+             : SLOT_STATE_STARTED;
+ 
++        // This is the last successful launch step before update_slots() can
++        // enqueue the first CUDA batch for the slot.
++        callback_request_activity(true);
++
+         // reset server kill-switch counter
+         n_empty_consecutive = 0;
+ 
+@@ -4122,6 +4128,10 @@ void server_context::set_state_callback(server_state_callback_t callback) {
+     impl->callback_state = std::move(callback);
+ }
+ 
++void server_context::set_request_activity_callback(server_request_activity_callback_t callback) {
++    impl->callback_request_activity = std::move(callback);
++}
++
+ //
+ // server_routes
+ //
+diff --git a/tools/server/server-context.h b/tools/server/server-context.h
+index 5d464b8e..3c030387 100644
+--- a/tools/server/server-context.h
++++ b/tools/server/server-context.h
+@@ -80,6 +80,7 @@ static server_state server_state_from_str(const std::string & str) {
+ }
+ 
+ using server_state_callback_t = std::function<void(server_state, json /* payload */)>;
++using server_request_activity_callback_t = std::function<void(bool /* started */)>;
+ 
+ struct server_context {
+     std::unique_ptr<server_context_impl> impl;
+@@ -110,6 +111,11 @@ struct server_context {
+ 
+     // note: must be set before load_model() is called
+     void set_state_callback(server_state_callback_t callback);
++
++    // Called once for every slot that starts/stops processing a request. The
++    // start notification is emitted after validation succeeds and before the
++    // slot can enqueue its first CUDA batch.
++    void set_request_activity_callback(server_request_activity_callback_t callback);
+ };
+ 
+ 
+diff --git a/tools/server/server-cupti.cpp b/tools/server/server-cupti.cpp
+new file mode 100644
+index 00000000..09ab68ff
+--- /dev/null
++++ b/tools/server/server-cupti.cpp
+@@ -0,0 +1,936 @@
++// SPDX-License-Identifier: MIT
++#include "server-cupti.h"
++
++#include "log.h"
++
++#include <cuda.h>
++#include <cupti.h>
++
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <cmath>
++#include <condition_variable>
++#include <cstdio>
++#include <cstdlib>
++#include <fstream>
++#include <iomanip>
++#include <limits>
++#include <map>
++#include <mutex>
++#include <sstream>
++#include <string>
++#include <thread>
++#include <unordered_map>
++#include <utility>
++#include <vector>
++
++namespace {
++
++constexpr const char * k_metric_names[] = {
++    "sm_efficiency",
++    "achieved_occupancy",
++    "ipc",
++    "dram_read_throughput",
++    "dram_write_throughput",
++    "dram_utilization",
++    "tensor_precision_fu_utilization",
++};
++
++const char * report_path() {
++    const char * value = std::getenv("LLAMA_CUPTI_REPORT_PATH");
++    return value && value[0] ? value : "/run/llama-cupti.json";
++}
++
++unsigned int sample_window_ms() {
++    const char * value = std::getenv("LLAMA_CUPTI_WINDOW_MS");
++    if (!value || !value[0]) return 250;
++    char * end = nullptr;
++    const unsigned long parsed = std::strtoul(value, &end, 10);
++    if (end == value || *end != '\0') return 250;
++    return static_cast<unsigned int>(std::max<unsigned long>(50, std::min<unsigned long>(5000, parsed)));
++}
++
++int64_t unix_time_ms() {
++    return std::chrono::duration_cast<std::chrono::milliseconds>(
++        std::chrono::system_clock::now().time_since_epoch()).count();
++}
++
++std::string json_escape(const std::string & value) {
++    std::ostringstream out;
++    for (unsigned char c : value) {
++        switch (c) {
++            case '\\': out << "\\\\"; break;
++            case '"':  out << "\\\""; break;
++            case '\b': out << "\\b"; break;
++            case '\f': out << "\\f"; break;
++            case '\n': out << "\\n"; break;
++            case '\r': out << "\\r"; break;
++            case '\t': out << "\\t"; break;
++            default:
++                if (c < 0x20) {
++                    out << "\\u" << std::hex << std::setw(4) << std::setfill('0') << static_cast<int>(c)
++                        << std::dec << std::setfill(' ');
++                } else {
++                    out << static_cast<char>(c);
++                }
++        }
++    }
++    return out.str();
++}
++
++std::string cupti_error(CUptiResult result) {
++    const char * text = nullptr;
++    if (cuptiGetResultString(result, &text) == CUPTI_SUCCESS && text) return text;
++    return "CUPTI error " + std::to_string(static_cast<int>(result));
++}
++
++std::string cuda_error(CUresult result) {
++    const char * text = nullptr;
++    if (cuGetErrorString(result, &text) == CUDA_SUCCESS && text) return text;
++    return "CUDA error " + std::to_string(static_cast<int>(result));
++}
++
++const char * value_kind_name(CUpti_MetricValueKind kind) {
++    switch (kind) {
++        case CUPTI_METRIC_VALUE_KIND_DOUBLE:            return "double";
++        case CUPTI_METRIC_VALUE_KIND_UINT64:            return "uint64";
++        case CUPTI_METRIC_VALUE_KIND_PERCENT:           return "percent";
++        case CUPTI_METRIC_VALUE_KIND_THROUGHPUT:        return "throughput";
++        case CUPTI_METRIC_VALUE_KIND_INT64:             return "int64";
++        case CUPTI_METRIC_VALUE_KIND_UTILIZATION_LEVEL: return "utilization_level";
++        default:                                        return "unknown";
++    }
++}
++
++const char * value_unit(CUpti_MetricValueKind kind) {
++    switch (kind) {
++        case CUPTI_METRIC_VALUE_KIND_PERCENT:           return "percent";
++        case CUPTI_METRIC_VALUE_KIND_THROUGHPUT:        return "bytes_per_second";
++        case CUPTI_METRIC_VALUE_KIND_UTILIZATION_LEVEL: return "level_0_10";
++        default:                                        return "scalar";
++    }
++}
++
++std::string metric_value_json(CUpti_MetricValueKind kind, const CUpti_MetricValue & value) {
++    std::ostringstream out;
++    out << std::setprecision(15);
++    switch (kind) {
++        case CUPTI_METRIC_VALUE_KIND_DOUBLE:
++            if (!std::isfinite(value.metricValueDouble)) return "null";
++            out << value.metricValueDouble;
++            break;
++        case CUPTI_METRIC_VALUE_KIND_UINT64:
++            out << value.metricValueUint64;
++            break;
++        case CUPTI_METRIC_VALUE_KIND_PERCENT:
++            if (!std::isfinite(value.metricValuePercent)) return "null";
++            out << value.metricValuePercent;
++            break;
++        case CUPTI_METRIC_VALUE_KIND_THROUGHPUT:
++            out << value.metricValueThroughput;
++            break;
++        case CUPTI_METRIC_VALUE_KIND_INT64:
++            out << value.metricValueInt64;
++            break;
++        case CUPTI_METRIC_VALUE_KIND_UTILIZATION_LEVEL:
++            out << static_cast<int>(value.metricValueUtilizationLevel);
++            break;
++        default:
++            return "null";
++    }
++    return out.str();
++}
++
++struct metric_sample {
++    CUpti_MetricID id = 0;
++    CUpti_MetricValueKind kind = CUPTI_METRIC_VALUE_KIND_FORCE_INT;
++    bool available = false;
++    bool valid = false;
++    bool disabled = false;
++    uint32_t consecutive_failures = 0;
++    uint32_t pass_count = 0;
++    std::string value = "null";
++    std::string error;
++    int64_t sampled_at_unix_ms = 0;
++    uint64_t window_ns = 0;
++};
++
++struct metric_bank {
++    std::string name;
++    std::vector<std::string> metric_names;
++    CUpti_EventGroupSets * sets = nullptr;
++    bool available = false;
++    bool enabled = false;
++    bool disabled = false;
++    uint32_t consecutive_failures = 0;
++    uint32_t pass_count = 0;
++    uint64_t last_read_timestamp_ns = 0;
++    std::string error;
++};
++
++struct device_state {
++    int ordinal = -1;
++    CUdevice device = 0;
++    CUcontext context = nullptr;
++    bool context_retained = false;
++    bool ready = false;
++    std::string name;
++    std::string pci_bus_id;
++    std::string error;
++    uint32_t event_domains = 0;
++    uint32_t metric_count = 0;
++    size_t active_bank_index = 0;
++    std::map<std::string, metric_sample> samples;
++    std::vector<metric_bank> banks;
++};
++
++class context_guard {
++public:
++    explicit context_guard(CUcontext context) {
++        result_ = cuCtxPushCurrent(context);
++        pushed_ = result_ == CUDA_SUCCESS;
++    }
++    ~context_guard() {
++        if (pushed_) {
++            CUcontext unused = nullptr;
++            cuCtxPopCurrent(&unused);
++        }
++    }
++    bool ok() const { return pushed_; }
++    CUresult result() const { return result_; }
++
++private:
++    CUresult result_ = CUDA_ERROR_UNKNOWN;
++    bool pushed_ = false;
++};
++
++bool normalized_event_value(CUdevice device, CUpti_EventGroup group, CUpti_EventID event,
++                            uint64_t & normalized, std::string & error) {
++    uint32_t instance_count = 0;
++    size_t size = sizeof(instance_count);
++    CUptiResult rc = cuptiEventGroupGetAttribute(
++        group, CUPTI_EVENT_GROUP_ATTR_INSTANCE_COUNT, &size, &instance_count);
++    if (rc != CUPTI_SUCCESS || instance_count == 0) {
++        error = "instance count: " + cupti_error(rc);
++        return false;
++    }
++
++    CUpti_EventDomainID domain = 0;
++    size = sizeof(domain);
++    rc = cuptiEventGroupGetAttribute(group, CUPTI_EVENT_GROUP_ATTR_EVENT_DOMAIN_ID, &size, &domain);
++    if (rc != CUPTI_SUCCESS) {
++        error = "event domain: " + cupti_error(rc);
++        return false;
++    }
++
++    uint32_t total_instance_count = 0;
++    size = sizeof(total_instance_count);
++    rc = cuptiDeviceGetEventDomainAttribute(
++        device, domain, CUPTI_EVENT_DOMAIN_ATTR_TOTAL_INSTANCE_COUNT, &size, &total_instance_count);
++    if (rc != CUPTI_SUCCESS || total_instance_count == 0) {
++        // Older CUPTI libraries accepted by newer drivers have been observed
++        // to reject TOTAL_INSTANCE_COUNT.  INSTANCE_COUNT is the legacy
++        // compatible device-domain equivalent.  If that is unavailable too,
++        // PROFILE_ALL_DOMAIN_INSTANCES means the values already cover every
++        // instance exposed by this event group, so no scaling is required.
++        total_instance_count = 0;
++        size = sizeof(total_instance_count);
++        rc = cuptiDeviceGetEventDomainAttribute(
++            device, domain, CUPTI_EVENT_DOMAIN_ATTR_INSTANCE_COUNT, &size, &total_instance_count);
++        if (rc != CUPTI_SUCCESS || total_instance_count == 0) total_instance_count = instance_count;
++    }
++
++    std::vector<uint64_t> values(instance_count);
++    size = values.size() * sizeof(values[0]);
++    rc = cuptiEventGroupReadEvent(group, CUPTI_EVENT_READ_FLAG_NONE, event, &size, values.data());
++    if (rc != CUPTI_SUCCESS) {
++        error = "event read: " + cupti_error(rc);
++        return false;
++    }
++
++    long double sum = 0;
++    for (uint64_t value : values) {
++        if (value == CUPTI_EVENT_OVERFLOW || value == CUPTI_EVENT_INVALID) {
++            error = "event counter overflow or invalid value";
++            return false;
++        }
++        sum += value;
++    }
++    const long double scaled = sum * total_instance_count / instance_count;
++    if (scaled > std::numeric_limits<uint64_t>::max()) {
++        error = "normalized event counter overflow";
++        return false;
++    }
++    normalized = static_cast<uint64_t>(scaled);
++    return true;
++}
++
++} // namespace
++
++struct server_cupti_collector::impl {
++    std::atomic<bool> stop_requested{false};
++    std::atomic<bool> running{false};
++    std::atomic<uint32_t> active_requests{0};
++    std::atomic<bool> rotate_requested{false};
++    std::thread worker;
++    std::mutex mutex;
++    std::mutex boundary_mutex;
++    std::condition_variable boundary_changed;
++    std::mutex wake_mutex;
++    std::condition_variable wake;
++    std::vector<device_state> devices;
++    unsigned int window_ms = sample_window_ms();
++    std::string detail = "initializing";
++
++    ~impl() {
++        stop();
++        destroy_event_groups();
++        release_contexts();
++    }
++
++    void destroy_event_groups() {
++        for (device_state & state : devices) {
++            if (!state.context) continue;
++            context_guard guard(state.context);
++            if (!guard.ok()) continue;
++            for (metric_bank & bank : state.banks) {
++                if (bank.enabled && bank.sets && bank.sets->numSets == 1) {
++                    cuptiEventGroupSetDisable(&bank.sets->sets[0]);
++                    bank.enabled = false;
++                }
++                if (bank.sets) {
++                    cuptiEventGroupSetsDestroy(bank.sets);
++                    bank.sets = nullptr;
++                }
++            }
++        }
++    }
++
++    void release_contexts() {
++        for (device_state & state : devices) {
++            if (state.context_retained) {
++                cuDevicePrimaryCtxRelease(state.device);
++                state.context_retained = false;
++                state.context = nullptr;
++            }
++        }
++    }
++
++    bool prepare_bank(device_state & state, metric_bank & bank) {
++        std::vector<CUpti_MetricID> ids;
++        ids.reserve(bank.metric_names.size());
++        for (const std::string & name : bank.metric_names) {
++            auto found = state.samples.find(name);
++            if (found == state.samples.end() || !found->second.available) {
++                bank.error = "metric unavailable: " + name;
++                return false;
++            }
++            ids.push_back(found->second.id);
++        }
++        CUptiResult rc = cuptiMetricCreateEventGroupSets(
++            state.context, ids.size() * sizeof(ids[0]), ids.data(), &bank.sets);
++        if (rc != CUPTI_SUCCESS || !bank.sets) {
++            bank.error = "create persistent event groups: " + cupti_error(rc);
++            bank.sets = nullptr;
++            return false;
++        }
++        bank.pass_count = bank.sets->numSets;
++        if (bank.sets->numSets != 1) {
++            bank.error = "bank requires " + std::to_string(bank.sets->numSets) +
++                " passes; expected one persistent pass";
++            cuptiEventGroupSetsDestroy(bank.sets);
++            bank.sets = nullptr;
++            return false;
++        }
++        CUpti_EventGroupSet & set = bank.sets->sets[0];
++        for (uint32_t i = 0; i < set.numEventGroups; ++i) {
++            uint32_t all_instances = 1;
++            rc = cuptiEventGroupSetAttribute(set.eventGroups[i],
++                CUPTI_EVENT_GROUP_ATTR_PROFILE_ALL_DOMAIN_INSTANCES,
++                sizeof(all_instances), &all_instances);
++            if (rc != CUPTI_SUCCESS) {
++                bank.error = "profile all domain instances: " + cupti_error(rc);
++                cuptiEventGroupSetsDestroy(bank.sets);
++                bank.sets = nullptr;
++                return false;
++            }
++        }
++        bank.available = true;
++        for (const std::string & name : bank.metric_names) {
++            state.samples[name].pass_count = bank.pass_count;
++        }
++        return true;
++    }
++
++    bool enable_bank(metric_bank & bank) {
++        if (!bank.available || bank.disabled || !bank.sets || bank.sets->numSets != 1) return false;
++        CUptiResult rc = cuptiEventGroupSetEnable(&bank.sets->sets[0]);
++        if (rc != CUPTI_SUCCESS) {
++            bank.error = "enable persistent event groups: " + cupti_error(rc);
++            return false;
++        }
++        bank.enabled = true;
++        rc = cuptiGetTimestamp(&bank.last_read_timestamp_ns);
++        if (rc != CUPTI_SUCCESS) {
++            cuptiEventGroupSetDisable(&bank.sets->sets[0]);
++            bank.enabled = false;
++            bank.error = "initial CUPTI timestamp: " + cupti_error(rc);
++            return false;
++        }
++        return true;
++    }
++
++    void disable_bank(metric_bank & bank) {
++        if (!bank.enabled || !bank.sets || bank.sets->numSets != 1) return;
++        const CUptiResult rc = cuptiEventGroupSetDisable(&bank.sets->sets[0]);
++        if (rc != CUPTI_SUCCESS && bank.error.empty()) {
++            bank.error = "disable persistent event groups: " + cupti_error(rc);
++        }
++        bank.enabled = false;
++        bank.last_read_timestamp_ns = 0;
++    }
++
++    bool select_first_bank(device_state & state) {
++        context_guard guard(state.context);
++        if (!guard.ok()) {
++            state.error = "push primary context for initial event set: " + cuda_error(guard.result());
++            return false;
++        }
++        for (size_t i = 0; i < state.banks.size(); ++i) {
++            if (enable_bank(state.banks[i])) {
++                state.active_bank_index = i;
++                return true;
++            }
++        }
++        state.error = "no requested persistent metric bank could be enabled";
++        return false;
++    }
++
++    bool initialize() {
++        CUresult cuda_rc = cuInit(0);
++        if (cuda_rc != CUDA_SUCCESS) {
++            detail = "CUDA initialization failed: " + cuda_error(cuda_rc);
++            write_report(false);
++            return false;
++        }
++
++        int device_count = 0;
++        cuda_rc = cuDeviceGetCount(&device_count);
++        if (cuda_rc != CUDA_SUCCESS || device_count == 0) {
++            detail = cuda_rc == CUDA_SUCCESS ? "no CUDA devices" : "CUDA device enumeration failed: " + cuda_error(cuda_rc);
++            write_report(false);
++            return false;
++        }
++
++        bool any_ready = false;
++        for (int ordinal = 0; ordinal < device_count; ++ordinal) {
++            device_state state;
++            state.ordinal = ordinal;
++            char name[256] = {};
++            cuda_rc = cuDeviceGet(&state.device, ordinal);
++            if (cuda_rc != CUDA_SUCCESS) {
++                state.error = "cuDeviceGet: " + cuda_error(cuda_rc);
++                devices.push_back(std::move(state));
++                continue;
++            }
++            if (cuDeviceGetName(name, sizeof(name), state.device) == CUDA_SUCCESS) state.name = name;
++            char pci_bus_id[32] = {};
++            cuda_rc = cuDeviceGetPCIBusId(pci_bus_id, sizeof(pci_bus_id), state.device);
++            if (cuda_rc == CUDA_SUCCESS) {
++                state.pci_bus_id = pci_bus_id;
++            } else {
++                state.error = "cuDeviceGetPCIBusId: " + cuda_error(cuda_rc);
++            }
++
++            CUptiResult cupti_rc = cuptiDeviceGetNumEventDomains(state.device, &state.event_domains);
++            if (cupti_rc != CUPTI_SUCCESS) {
++                state.error = "event domain discovery: " + cupti_error(cupti_rc);
++                devices.push_back(std::move(state));
++                continue;
++            }
++            cupti_rc = cuptiDeviceGetNumMetrics(state.device, &state.metric_count);
++            if (cupti_rc != CUPTI_SUCCESS) {
++                state.error = "metric discovery: " + cupti_error(cupti_rc);
++                devices.push_back(std::move(state));
++                continue;
++            }
++
++            cuda_rc = cuDevicePrimaryCtxRetain(&state.context, state.device);
++            if (cuda_rc != CUDA_SUCCESS) {
++                state.error = "retain primary context: " + cuda_error(cuda_rc);
++                devices.push_back(std::move(state));
++                continue;
++            }
++            state.context_retained = true;
++
++            {
++                context_guard guard(state.context);
++                if (!guard.ok()) {
++                    state.error = "push primary context: " + cuda_error(guard.result());
++                    devices.push_back(std::move(state));
++                    continue;
++                }
++                cupti_rc = cuptiSetEventCollectionMode(state.context, CUPTI_EVENT_COLLECTION_MODE_CONTINUOUS);
++                if (cupti_rc != CUPTI_SUCCESS) {
++                    state.error = "continuous collection mode: " + cupti_error(cupti_rc);
++                    devices.push_back(std::move(state));
++                    continue;
++                }
++
++                for (const char * metric_name : k_metric_names) {
++                    metric_sample sample;
++                    cupti_rc = cuptiMetricGetIdFromName(state.device, metric_name, &sample.id);
++                    if (cupti_rc != CUPTI_SUCCESS) {
++                        sample.error = "metric lookup: " + cupti_error(cupti_rc);
++                        state.samples.emplace(metric_name, std::move(sample));
++                        continue;
++                    }
++                    size_t size = sizeof(sample.kind);
++                    cupti_rc = cuptiMetricGetAttribute(sample.id, CUPTI_METRIC_ATTR_VALUE_KIND, &size, &sample.kind);
++                    if (cupti_rc != CUPTI_SUCCESS) {
++                        sample.error = "value kind: " + cupti_error(cupti_rc);
++                    } else {
++                        sample.available = true;
++                    }
++                    state.samples.emplace(metric_name, std::move(sample));
++                }
++
++                metric_bank core_dram;
++                core_dram.name = "core_dram";
++                for (size_t i = 0; i < 6; ++i) core_dram.metric_names.emplace_back(k_metric_names[i]);
++                state.banks.push_back(std::move(core_dram));
++
++                metric_bank tensor;
++                tensor.name = "tensor";
++                tensor.metric_names.emplace_back(k_metric_names[6]);
++                state.banks.push_back(std::move(tensor));
++
++                for (metric_bank & bank : state.banks) prepare_bank(state, bank);
++            }
++
++            state.ready = select_first_bank(state);
++            any_ready = any_ready || state.ready;
++            devices.push_back(std::move(state));
++        }
++
++        detail = any_ready
++            ? "legacy CUPTI persistent collector ready; event sets rotate only at idle request boundaries"
++            : "no CUDA device accepted legacy CUPTI event collection";
++        write_report(any_ready);
++        return any_ready;
++    }
++
++    // CUPTI continuous-mode reads return the current interval and implicitly
++    // zero that event.  We do not issue an explicit ResetAllEvents call.
++    // No create/enable/disable/reset/destroy operation occurs on this path.
++    size_t read_bank(device_state & state, metric_bank & bank, bool publish_empty = true) {
++        if (!bank.enabled || !bank.sets || bank.sets->numSets != 1) {
++            bank.error = "metric bank is not enabled";
++            return 0;
++        }
++        context_guard guard(state.context);
++        if (!guard.ok()) {
++            bank.error = "push context: " + cuda_error(guard.result());
++            return 0;
++        }
++
++        uint64_t ended_ns = 0;
++        CUptiResult rc = cuptiGetTimestamp(&ended_ns);
++        if (rc != CUPTI_SUCCESS || ended_ns <= bank.last_read_timestamp_ns) {
++            bank.error = "CUPTI timestamp: " + cupti_error(rc);
++            return 0;
++        }
++        const uint64_t duration_ns = ended_ns - bank.last_read_timestamp_ns;
++        CUpti_EventGroupSet & set = bank.sets->sets[0];
++
++        std::unordered_map<CUpti_EventID, uint64_t> deltas_by_id;
++        std::string read_error;
++        bool read_ok = true;
++        bool any_nonzero = false;
++        for (uint32_t group_index = 0; group_index < set.numEventGroups && read_ok; ++group_index) {
++            CUpti_EventGroup group = set.eventGroups[group_index];
++            uint32_t event_count = 0;
++            size_t size = sizeof(event_count);
++            rc = cuptiEventGroupGetAttribute(group, CUPTI_EVENT_GROUP_ATTR_NUM_EVENTS, &size, &event_count);
++            if (rc != CUPTI_SUCCESS) {
++                read_error = "event count: " + cupti_error(rc);
++                read_ok = false;
++                break;
++            }
++            std::vector<CUpti_EventID> event_ids(event_count);
++            size = event_ids.size() * sizeof(event_ids[0]);
++            rc = cuptiEventGroupGetAttribute(group, CUPTI_EVENT_GROUP_ATTR_EVENTS, &size, event_ids.data());
++            if (rc != CUPTI_SUCCESS) {
++                read_error = "event enumeration: " + cupti_error(rc);
++                read_ok = false;
++                break;
++            }
++            for (CUpti_EventID event_id : event_ids) {
++                uint64_t current_value = 0;
++                if (!normalized_event_value(state.device, group, event_id, current_value, read_error)) {
++                    read_ok = false;
++                    break;
++                }
++                deltas_by_id[event_id] = current_value;
++                any_nonzero = any_nonzero || current_value != 0;
++            }
++        }
++        bank.last_read_timestamp_ns = ended_ns;
++
++        if (!read_ok) {
++            bank.error = read_error;
++            for (const std::string & metric_name : bank.metric_names) {
++                metric_sample & sample = state.samples[metric_name];
++                sample.valid = false;
++                sample.value = "null";
++                sample.error = read_error;
++            }
++            return 0;
++        }
++        if (!publish_empty && !any_nonzero) return 0;
++
++        size_t successful = 0;
++        for (const std::string & metric_name : bank.metric_names) {
++            metric_sample & sample = state.samples[metric_name];
++            sample.valid = false;
++            sample.value = "null";
++            sample.window_ns = 0;
++            sample.sampled_at_unix_ms = 0;
++            sample.error.clear();
++            uint32_t required_count = 0;
++            rc = cuptiMetricGetNumEvents(sample.id, &required_count);
++            std::vector<CUpti_EventID> event_ids(required_count);
++            if (rc == CUPTI_SUCCESS) {
++                size_t size = event_ids.size() * sizeof(event_ids[0]);
++                rc = cuptiMetricEnumEvents(sample.id, &size, event_ids.data());
++            }
++            std::vector<uint64_t> event_values;
++            if (rc == CUPTI_SUCCESS) {
++                event_values.reserve(event_ids.size());
++                for (CUpti_EventID event_id : event_ids) {
++                    const auto found = deltas_by_id.find(event_id);
++                    if (found == deltas_by_id.end()) {
++                        rc = CUPTI_ERROR_PARAMETER_SIZE_NOT_SUFFICIENT;
++                        sample.error = "required event was not returned by its metric bank";
++                        break;
++                    }
++                    event_values.push_back(found->second);
++                }
++            }
++
++            CUpti_MetricValue metric_value{};
++            if (rc == CUPTI_SUCCESS) {
++                rc = cuptiMetricGetValue(state.device, sample.id,
++                    event_ids.size() * sizeof(event_ids[0]), event_ids.data(),
++                    event_values.size() * sizeof(event_values[0]), event_values.data(),
++                    duration_ns, &metric_value);
++            }
++            if (rc == CUPTI_SUCCESS) {
++                sample.value = metric_value_json(sample.kind, metric_value);
++                sample.valid = sample.value != "null";
++                sample.window_ns = duration_ns;
++                sample.sampled_at_unix_ms = unix_time_ms();
++                sample.error.clear();
++                ++successful;
++            } else {
++                sample.valid = false;
++                if (sample.error.empty()) sample.error = "metric evaluation: " + cupti_error(rc);
++            }
++        }
++        bank.error.clear();
++        return successful;
++    }
++
++    bool rotate_at_idle_boundary() {
++        std::lock_guard<std::mutex> boundary_lock(boundary_mutex);
++        if (active_requests.load(std::memory_order_acquire) != 0 ||
++            !rotate_requested.load(std::memory_order_acquire)) return false;
++        rotate_requested.store(false, std::memory_order_release);
++
++        bool rotated = false;
++        for (device_state & state : devices) {
++            if (!state.ready || state.banks.empty()) continue;
++
++            metric_bank & current = state.banks[state.active_bank_index];
++            if (current.enabled && !current.disabled) {
++                // One final read accounts for the tail of the request.  The
++                // boundary lock prevents the next request from beginning.
++                read_bank(state, current, false);
++            }
++
++            context_guard guard(state.context);
++            if (!guard.ok()) {
++                state.error = "push context for idle rotation: " + cuda_error(guard.result());
++                continue;
++            }
++            disable_bank(current);
++
++            bool selected = false;
++            for (size_t offset = 1; offset <= state.banks.size(); ++offset) {
++                const size_t candidate_index = (state.active_bank_index + offset) % state.banks.size();
++                metric_bank & candidate = state.banks[candidate_index];
++                if (!candidate.available || candidate.disabled) continue;
++                if (enable_bank(candidate)) {
++                    state.active_bank_index = candidate_index;
++                    selected = true;
++                    rotated = true;
++                    break;
++                }
++                candidate.disabled = true;
++            }
++            if (!selected) {
++                state.ready = false;
++                state.error = "all persistent metric sets are disabled";
++            }
++        }
++        detail = rotated
++            ? "persistent CUPTI metric set rotated at idle request boundary"
++            : "no persistent CUPTI metric set remains eligible";
++        boundary_changed.notify_all();
++        return rotated;
++    }
++
++    void run() {
++        while (!stop_requested.load(std::memory_order_relaxed)) {
++            {
++                std::unique_lock<std::mutex> lock(wake_mutex);
++                wake.wait_for(lock, std::chrono::milliseconds(window_ms), [this]() {
++                    return stop_requested.load(std::memory_order_relaxed) ||
++                           (rotate_requested.load(std::memory_order_relaxed) &&
++                            active_requests.load(std::memory_order_relaxed) == 0);
++                });
++            }
++            if (stop_requested.load(std::memory_order_relaxed)) break;
++
++            size_t successful = 0;
++            if (active_requests.load(std::memory_order_acquire) != 0) {
++                for (device_state & state : devices) {
++                    if (!state.ready || state.banks.empty()) continue;
++                    metric_bank & bank = state.banks[state.active_bank_index];
++                    if (!bank.enabled || bank.disabled) continue;
++                    const size_t bank_successful = read_bank(state, bank);
++                    if (bank_successful != 0) {
++                        bank.consecutive_failures = 0;
++                        successful += bank_successful;
++                    } else {
++                        ++bank.consecutive_failures;
++                        if (bank.consecutive_failures >= 3) {
++                            bank.disabled = true;
++                            bank.error = "disabled after 3 consecutive CUPTI failures: " + bank.error;
++                            // The group remains enabled until the request ends.
++                            // Disabling it here would mutate PMU state mid-decode.
++                            rotate_requested.store(true, std::memory_order_release);
++                        }
++                    }
++                }
++                detail = successful
++                    ? "sampling the enabled persistent CUPTI set; no group mutation during active requests"
++                    : "active request has no successful CUPTI sample in this interval";
++            } else if (rotate_requested.load(std::memory_order_acquire)) {
++                rotate_at_idle_boundary();
++            }
++            const bool any_ready = std::any_of(devices.begin(), devices.end(), [](const device_state & state) {
++                return state.ready;
++            });
++            write_report(any_ready);
++        }
++        running.store(false, std::memory_order_release);
++        write_report(false);
++    }
++
++    void write_samples(std::ostream & out, const device_state & state, const std::string & indent) const {
++        out << "{\n";
++        bool first = true;
++        for (const auto & entry : state.samples) {
++            if (!first) out << ",\n";
++            first = false;
++            const metric_sample & sample = entry.second;
++            const metric_bank * bank = nullptr;
++            for (const metric_bank & candidate : state.banks) {
++                if (std::find(candidate.metric_names.begin(), candidate.metric_names.end(), entry.first) != candidate.metric_names.end()) {
++                    bank = &candidate;
++                    break;
++                }
++            }
++            out << indent << "  \"" << json_escape(entry.first) << "\": {"
++                << "\"available\":" << (sample.available ? "true" : "false")
++                << ",\"valid\":" << (sample.valid ? "true" : "false")
++                << ",\"enabled\":" << (bank && bank->enabled ? "true" : "false")
++                << ",\"disabled\":" << (bank && bank->disabled ? "true" : "false")
++                << ",\"bank\":\"" << json_escape(bank ? bank->name : "") << "\""
++                << ",\"consecutive_failures\":" << (bank ? bank->consecutive_failures : 0)
++                << ",\"value\":" << sample.value
++                << ",\"value_kind\":\"" << value_kind_name(sample.kind) << "\""
++                << ",\"unit\":\"" << value_unit(sample.kind) << "\""
++                << ",\"sampled_at_unix_ms\":" << sample.sampled_at_unix_ms
++                << ",\"window_ns\":" << sample.window_ns
++                << ",\"pass_count\":" << sample.pass_count
++                << ",\"simultaneous_with_other_metrics\":"
++                << (bank && bank->metric_names.size() > 1 ? "true" : "false")
++                << ",\"error\":\"" << json_escape(sample.error) << "\"}";
++        }
++        out << "\n" << indent << "}";
++    }
++
++    void write_report(bool ready) {
++        std::lock_guard<std::mutex> lock(mutex);
++        const std::string path = report_path();
++        std::ofstream out(path + ".tmp", std::ios::trunc);
++        if (!out) {
++            SRV_WRN("CUPTI: cannot write report to %s\n", path.c_str());
++            return;
++        }
++
++        uint32_t event_domains = devices.empty() ? 0 : devices.front().event_domains;
++        uint32_t metric_count = devices.empty() ? 0 : devices.front().metric_count;
++        out << "{\n"
++            << "  \"schema_version\": 3,\n"
++            << "  \"collector_mode\": \"persistent-bank-boundary-rotation\",\n"
++            << "  \"ready\": " << (ready ? "true" : "false") << ",\n"
++            << "  \"active_requests\": " << active_requests.load(std::memory_order_acquire) << ",\n"
++            << "  \"event_domains\": " << event_domains << ",\n"
++            << "  \"metrics\": " << metric_count << ",\n"
++            << "  \"rotation\": {\"simultaneous\":false,\"sample_period_ms\":" << window_ms
++            << ",\"requested_metrics\":" << (sizeof(k_metric_names) / sizeof(k_metric_names[0]))
++            << ",\"device_count\":" << devices.size()
++            << ",\"bank_count\":2"
++            << ",\"policy\":\"core_dram has six simultaneous metrics; tensor is a separate bank; switch only at active_requests zero\""
++            << ",\"note\":\"Groups stay enabled; each read returns and implicitly clears that event interval. Compare timestamps before cross-bank correlation.\"},\n";
++
++        if (!devices.empty()) {
++            out << "  \"samples\": ";
++            write_samples(out, devices.front(), "  ");
++            out << ",\n";
++        } else {
++            out << "  \"samples\": {},\n";
++        }
++
++        out << "  \"devices\": [";
++        for (size_t i = 0; i < devices.size(); ++i) {
++            if (i) out << ',';
++            const device_state & state = devices[i];
++            const metric_bank * active_bank = state.banks.empty() ? nullptr : &state.banks[state.active_bank_index];
++            out << "\n    {\"ordinal\":" << state.ordinal
++                << ",\"name\":\"" << json_escape(state.name) << "\""
++                << ",\"pci_bus_id\":\"" << json_escape(state.pci_bus_id) << "\""
++                << ",\"ready\":" << (state.ready ? "true" : "false")
++                << ",\"event_domains\":" << state.event_domains
++                << ",\"metrics\":" << state.metric_count
++                << ",\"active_bank\":\"" << json_escape(active_bank ? active_bank->name : "") << "\""
++                << ",\"banks\":[";
++            for (size_t bank_index = 0; bank_index < state.banks.size(); ++bank_index) {
++                if (bank_index) out << ',';
++                const metric_bank & bank = state.banks[bank_index];
++                out << "{\"name\":\"" << json_escape(bank.name) << "\""
++                    << ",\"available\":" << (bank.available ? "true" : "false")
++                    << ",\"enabled\":" << (bank.enabled ? "true" : "false")
++                    << ",\"disabled\":" << (bank.disabled ? "true" : "false")
++                    << ",\"pass_count\":" << bank.pass_count
++                    << ",\"consecutive_failures\":" << bank.consecutive_failures
++                    << ",\"error\":\"" << json_escape(bank.error) << "\"}";
++            }
++            out << ']'
++                << ",\"error\":\"" << json_escape(state.error) << "\""
++                << ",\"samples\":";
++            write_samples(out, state, "    ");
++            out << '}';
++        }
++        if (!devices.empty()) out << '\n';
++        out << "  ],\n"
++            << "  \"detail\": \"" << json_escape(detail) << "\"\n"
++            << "}\n";
++        out.close();
++        if (!out) {
++            SRV_WRN("CUPTI: failed while writing report to %s\n", path.c_str());
++            return;
++        }
++        if (std::rename((path + ".tmp").c_str(), path.c_str()) != 0) {
++            SRV_WRN("CUPTI: cannot atomically publish report to %s\n", path.c_str());
++        }
++    }
++
++    void request_begin() {
++        // This lock is also held across an idle bank switch.  A scheduler that
++        // calls this hook before enqueueing CUDA work cannot race that switch.
++        std::unique_lock<std::mutex> lock(boundary_mutex);
++        if (active_requests.load(std::memory_order_acquire) == 0 &&
++            rotate_requested.load(std::memory_order_acquire)) {
++            wake.notify_all();
++            boundary_changed.wait(lock, [this]() {
++                return stop_requested.load(std::memory_order_relaxed) ||
++                       !rotate_requested.load(std::memory_order_acquire);
++            });
++        }
++        if (stop_requested.load(std::memory_order_relaxed)) return;
++        active_requests.fetch_add(1, std::memory_order_acq_rel);
++        wake.notify_all();
++    }
++
++    void request_end() {
++        std::lock_guard<std::mutex> lock(boundary_mutex);
++        const uint32_t current = active_requests.load(std::memory_order_acquire);
++        if (current == 0) {
++            SRV_WRN("%s", "CUPTI: unmatched request-end hook ignored\n");
++            return;
++        }
++        active_requests.store(current - 1, std::memory_order_release);
++        if (current == 1) rotate_requested.store(true, std::memory_order_release);
++        wake.notify_all();
++    }
++
++    bool start() {
++        if (!initialize()) return false;
++        stop_requested.store(false, std::memory_order_relaxed);
++        // Publish the started state before creating the thread. The server can
++        // emit READY and then call start() explicitly in immediate succession;
++        // without this ordering that second call can tear down a worker that
++        // has not reached run() yet.
++        running.store(true, std::memory_order_release);
++        worker = std::thread(&impl::run, this);
++        return true;
++    }
++
++    void stop() {
++        stop_requested.store(true, std::memory_order_relaxed);
++        wake.notify_all();
++        boundary_changed.notify_all();
++        if (worker.joinable()) worker.join();
++    }
++};
++
++server_cupti_collector::server_cupti_collector() = default;
++server_cupti_collector::~server_cupti_collector() { stop(); }
++
++bool server_cupti_collector::start() {
++    if (impl_ && impl_->running.load(std::memory_order_acquire)) return true;
++    if (impl_) {
++        impl_->stop();
++        impl_.reset();
++    }
++    impl_.reset(new impl());
++    if (!impl_->start()) {
++        impl_.reset();
++        return false;
++    }
++    return true;
++}
++
++void server_cupti_collector::stop() {
++    if (!impl_) return;
++    impl_->stop();
++    impl_.reset();
++}
++
++void server_cupti_collector::on_state(server_state state) {
++    if (state == SERVER_STATE_SLEEPING) stop();
++    else if (state == SERVER_STATE_READY && !impl_) start();
++}
++
++void server_cupti_collector::on_request_begin() {
++    if (impl_) impl_->request_begin();
++}
++
++void server_cupti_collector::on_request_end() {
++    if (impl_) impl_->request_end();
++}
+diff --git a/tools/server/server-cupti.h b/tools/server/server-cupti.h
+new file mode 100644
+index 00000000..c38e7f0e
+--- /dev/null
++++ b/tools/server/server-cupti.h
+@@ -0,0 +1,34 @@
++// SPDX-License-Identifier: MIT
++#pragma once
++
++#include "server-context.h"
++
++#include <memory>
++
++// Legacy CUPTI Event/Metric API collector for CMP devices. Six core/DRAM
++// metrics share one simultaneous persistent bank; the conflicting Tensor
++// metric uses a second bank selected only at an idle request boundary.
++class server_cupti_collector {
++public:
++    server_cupti_collector();
++    ~server_cupti_collector();
++
++    server_cupti_collector(const server_cupti_collector &) = delete;
++    server_cupti_collector & operator=(const server_cupti_collector &) = delete;
++
++    bool start();
++    void stop();
++    void on_state(server_state state);
++
++    // These hooks must bracket work which may enqueue CUDA kernels.  In
++    // particular, on_request_begin() must run before the first enqueue.  They
++    // let the collector rotate the one enabled legacy CUPTI event set only at
++    // an idle boundary; no event group is enabled/disabled while a request is
++    // active.  The counter makes overlapping --parallel requests safe.
++    void on_request_begin();
++    void on_request_end();
++
++private:
++    struct impl;
++    std::unique_ptr<impl> impl_;
++};
+diff --git a/tools/server/server.cpp b/tools/server/server.cpp
+index 5fe2729b..5a04be00 100644
+--- a/tools/server/server.cpp
++++ b/tools/server/server.cpp
+@@ -1,3 +1,7 @@
++#if defined(LLAMA_CUPTI_LEGACY)
++#include "server-cupti.h"
++#endif
++
+ #include "server-context.h"
+ #include "server-http.h"
+ #include "server-models.h"
+@@ -169,6 +173,10 @@ int llama_server(common_params & params, int argc, char ** argv) {
+     // struct that contains llama context and inference
+     server_context ctx_server;
+ 
++#if defined(LLAMA_CUPTI_LEGACY)
++    server_cupti_collector cupti_collector;
++#endif
++
+     server_http_context ctx_http;
+     if (!ctx_http.init(params)) {
+         SRV_ERR("%s", "failed to initialize HTTP server\n");
+@@ -438,11 +446,18 @@ int llama_server(common_params & params, int argc, char ** argv) {
+ 
+     } else {
+         // setup clean up function, to be called before exit
+-        clean_up = [&ctx_http, &ctx_server, &mcp_mgr]() {
++        clean_up = [&ctx_http, &ctx_server, &mcp_mgr
++#if defined(LLAMA_CUPTI_LEGACY)
++                    , &cupti_collector
++#endif
++                    ]() {
+             SRV_INF("%s: cleaning up before exit...\n", __func__);
+             // stop the session GC first, it finalizes live sessions and wakes pending readers
+             server_stream_session_manager_stop();
+             ctx_http.stop();
++#if defined(LLAMA_CUPTI_LEGACY)
++            cupti_collector.stop();
++#endif
+             ctx_server.terminate();
+             mcp_mgr.shutdown();
+             llama_backend_free();
+@@ -455,12 +470,25 @@ int llama_server(common_params & params, int argc, char ** argv) {
+             return 1;
+         }
+ 
+-        // setup communication child --> router if necessary
+-        if (child.is_child()) {
+-            ctx_server.set_state_callback([&](server_state state, json payload) {
++        // setup communication child --> router and optional CUPTI lifecycle
++        ctx_server.set_state_callback([&](server_state state, json payload) {
++#if defined(LLAMA_CUPTI_LEGACY)
++            cupti_collector.on_state(state);
++#endif
++            if (child.is_child()) {
+                 child.notify_to_router(server_state_to_str(state), payload);
+-            });
+-        }
++            }
++        });
++
++#if defined(LLAMA_CUPTI_LEGACY)
++        ctx_server.set_request_activity_callback([&](bool started) {
++            if (started) {
++                cupti_collector.on_request_begin();
++            } else {
++                cupti_collector.on_request_end();
++            }
++        });
++#endif
+ 
+         if (!ctx_server.load_model(params)) {
+             clean_up();
+@@ -471,6 +499,10 @@ int llama_server(common_params & params, int argc, char ** argv) {
+             return 1;
+         }
+ 
++#if defined(LLAMA_CUPTI_LEGACY)
++        cupti_collector.start();
++#endif
++
+         routes.update_meta(ctx_server);
+         ctx_http.is_ready.store(true);
+ 

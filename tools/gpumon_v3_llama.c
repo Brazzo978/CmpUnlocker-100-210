@@ -1,4 +1,4 @@
-
+/* SPDX-License-Identifier: GPL-2.0-only */
 #define _GNU_SOURCE
 #include <ncurses.h>
 #include <nvml.h>
@@ -7,13 +7,13 @@
 #include <systemd/sd-journal.h>
 
 #include <errno.h>
+#include <dirent.h>
 #include <glob.h>
 #include <locale.h>
 #include <math.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
-/* SPDX-License-Identifier: GPL-2.0-only */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,6 +28,7 @@
 typedef struct {
     nvmlDevice_t h;
     char name[96];
+    char pci_bus_id[32];
 
     unsigned int gpu_util;
     unsigned int mem_util;
@@ -60,6 +61,27 @@ typedef struct {
     int hist_pos;
     int hist_count;
 } GpuStats;
+
+typedef struct {
+    int available, valid, enabled, disabled;
+    int simultaneous;
+    double value;
+    int64_t sampled_at_unix_ms;
+    int64_t window_ns;
+    char bank[32];
+    char value_kind[32];
+    char unit[32];
+} CuptiMetric;
+
+typedef struct {
+    int present, valid, ready, event_domains, metrics_available;
+    int schema_version, active_requests, sample_period_ms;
+    CuptiMetric sm, occ, ipc, dram_read, dram_write, dram_level, tensor;
+    char mode[48];
+    char active_bank[32];
+    char pci_bus_id[32];
+    char detail[160];
+} CuptiStats;
 
 typedef enum {
     PHASE_UNKNOWN = 0,
@@ -565,13 +587,68 @@ static void llama_fetch_profile(OllamaStats *o) {
     json_object_put(root);
 }
 
+static long proc_parent_pid(long pid) {
+    char path[64], line[256];
+    snprintf(path, sizeof(path), "/proc/%ld/status", pid);
+    FILE *fp = fopen(path, "r");
+    if (!fp) return -1;
+    long parent = -1;
+    while (fgets(line, sizeof(line), fp)) {
+        if (sscanf(line, "PPid:%ld", &parent) == 1) break;
+    }
+    fclose(fp);
+    return parent;
+}
+
+static int proc_cmdline_contains(long pid, const char *needle) {
+    char path[64], command[4096];
+    snprintf(path, sizeof(path), "/proc/%ld/cmdline", pid);
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return 0;
+    size_t n = fread(command, 1, sizeof(command) - 1, fp);
+    fclose(fp);
+    if (!n) return 0;
+    for (size_t i = 0; i < n; ++i) if (command[i] == '\0') command[i] = ' ';
+    command[n] = '\0';
+    return strstr(command, needle) != NULL;
+}
+
 static long llama_find_pid(void) {
-    FILE *pp = popen("pgrep -n -x llama-server", "r");
-    if (!pp) return -1;
-    long pid = -1;
-    (void)fscanf(pp, "%ld", &pid);
-    pclose(pp);
-    return pid;
+    DIR *proc = opendir("/proc");
+    if (!proc) return -1;
+
+    long selected = -1;
+    int selected_score = -1;
+    struct dirent *entry;
+    while ((entry = readdir(proc)) != NULL) {
+        errno = 0;
+        char *end = NULL;
+        long pid = strtol(entry->d_name, &end, 10);
+        if (errno || end == entry->d_name || *end != '\0' || pid <= 0) continue;
+
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%ld/cmdline", pid);
+        FILE *fp = fopen(path, "rb");
+        if (!fp) continue;
+        char command[4096];
+        size_t n = fread(command, 1, sizeof(command) - 1, fp);
+        fclose(fp);
+        if (!n) continue;
+        command[n] = '\0';
+
+        const char *base = strrchr(command, '/');
+        base = base ? base + 1 : command;
+        if (strncmp(base, "llama-server", strlen("llama-server")) != 0) continue;
+
+        long parent = proc_parent_pid(pid);
+        int score = parent > 0 && proc_cmdline_contains(parent, "unsloth") ? 2 : 1;
+        if (score > selected_score || (score == selected_score && pid > selected)) {
+            selected = pid;
+            selected_score = score;
+        }
+    }
+    closedir(proc);
+    return selected;
 }
 
 static int llama_discover_endpoint(char *endpoint, size_t endpoint_size, long *pid_out) {
@@ -1249,8 +1326,208 @@ static const char *phase_name(OllamaPhase p) {
     }
 }
 
+static int64_t unix_time_ms(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return 0;
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void cupti_metric_update(CuptiMetric *metric, json_object *sample) {
+    if (!metric || !sample || !json_object_is_type(sample, json_type_object)) return;
+    json_object *v = NULL;
+    if (json_object_object_get_ex(sample, "available", &v)) metric->available = json_object_get_boolean(v);
+    if (json_object_object_get_ex(sample, "valid", &v)) metric->valid = json_object_get_boolean(v);
+    if (json_object_object_get_ex(sample, "enabled", &v)) metric->enabled = json_object_get_boolean(v);
+    if (json_object_object_get_ex(sample, "disabled", &v)) metric->disabled = json_object_get_boolean(v);
+    if (json_object_object_get_ex(sample, "simultaneous_with_other_metrics", &v))
+        metric->simultaneous = json_object_get_boolean(v);
+    if (json_object_object_get_ex(sample, "bank", &v))
+        snprintf(metric->bank, sizeof(metric->bank), "%s", json_object_get_string(v));
+    if (json_object_object_get_ex(sample, "value_kind", &v))
+        snprintf(metric->value_kind, sizeof(metric->value_kind), "%s", json_object_get_string(v));
+    if (json_object_object_get_ex(sample, "unit", &v))
+        snprintf(metric->unit, sizeof(metric->unit), "%s", json_object_get_string(v));
+    if (json_object_object_get_ex(sample, "sampled_at_unix_ms", &v))
+        metric->sampled_at_unix_ms = json_object_get_int64(v);
+    if (json_object_object_get_ex(sample, "window_ns", &v))
+        metric->window_ns = json_object_get_int64(v);
+    if (metric->valid && json_object_object_get_ex(sample, "value", &v))
+        metric->value = json_object_get_double(v);
+}
+
+static void cupti_samples_update(CuptiStats *c, json_object *samples) {
+    if (!samples || !json_object_is_type(samples, json_type_object)) return;
+    struct sample_ref { const char *name; CuptiMetric *metric; } refs[] = {
+        {"sm_efficiency", &c->sm}, {"achieved_occupancy", &c->occ},
+        {"ipc", &c->ipc}, {"dram_read_throughput", &c->dram_read},
+        {"dram_write_throughput", &c->dram_write},
+        {"dram_utilization", &c->dram_level},
+        {"tensor_precision_fu_utilization", &c->tensor},
+    };
+    for (size_t i = 0; i < sizeof(refs)/sizeof(refs[0]); ++i) {
+        json_object *sample = NULL;
+        if (json_object_object_get_ex(samples, refs[i].name, &sample))
+            cupti_metric_update(refs[i].metric, sample);
+    }
+}
+
+static int64_t cupti_metric_age_ms(const CuptiMetric *metric) {
+    if (!metric || !metric->valid || metric->sampled_at_unix_ms <= 0) return -1;
+    int64_t age = unix_time_ms() - metric->sampled_at_unix_ms;
+    return age < 0 ? 0 : age;
+}
+
+static const char *cupti_metric_state(const CuptiStats *stats, const CuptiMetric *metric) {
+    if (!metric || !metric->available || !metric->valid) return "unavailable";
+    if (stats->active_requests == 0 || !metric->enabled) return "hold";
+    int64_t age = cupti_metric_age_ms(metric);
+    int64_t stale_after = stats->sample_period_ms > 0 ? (int64_t)stats->sample_period_ms * 3 : 1000;
+    if (stale_after < 1000) stale_after = 1000;
+    return age < 0 || age > stale_after ? "stale" : "live";
+}
+
+static const char *cupti_bank_state(const CuptiStats *stats) {
+    const CuptiMetric *metric = strcmp(stats->active_bank, "tensor") == 0
+        ? &stats->tensor : &stats->sm;
+    return cupti_metric_state(stats, metric);
+}
+
+static const char *cupti_bank_state_upper(const CuptiStats *stats) {
+    const char *state = cupti_bank_state(stats);
+    if (strcmp(state, "live") == 0) return "LIVE";
+    if (strcmp(state, "stale") == 0) return "STALE";
+    if (strcmp(state, "hold") == 0) return "HOLD";
+    return "N/A";
+}
+
+static void format_age(char *out, size_t out_size, int64_t age_ms) {
+    if (age_ms < 0) snprintf(out, out_size, "n/a");
+    else if (age_ms < 1000) snprintf(out, out_size, "%lldms", (long long)age_ms);
+    else if (age_ms < 60000) snprintf(out, out_size, "%.1fs", age_ms / 1000.0);
+    else if (age_ms < 3600000) snprintf(out, out_size, "%.1fm", age_ms / 60000.0);
+    else snprintf(out, out_size, "%.1fh", age_ms / 3600000.0);
+}
+
+static int parse_pci_bus_id(const char *text, unsigned int *domain, unsigned int *bus,
+                            unsigned int *device, unsigned int *function) {
+    int consumed = 0;
+    if (!text || sscanf(text, "%x:%x:%x.%x%n", domain, bus, device, function, &consumed) != 4 ||
+        text[consumed] != '\0') return 0;
+    return *bus <= 0xff && *device <= 0x1f && *function <= 7;
+}
+
+static int nvml_index_for_pci_bus_id(const GpuStats *gpu, unsigned int gpu_count,
+                                     const char *pci_bus_id) {
+    unsigned int domain, bus, device, function;
+    if (!parse_pci_bus_id(pci_bus_id, &domain, &bus, &device, &function)) return -1;
+    int match = -1;
+    for (unsigned int i = 0; i < gpu_count; ++i) {
+        unsigned int nvml_domain, nvml_bus, nvml_device, nvml_function;
+        if (!parse_pci_bus_id(gpu[i].pci_bus_id, &nvml_domain, &nvml_bus,
+                              &nvml_device, &nvml_function) ||
+            domain != nvml_domain || bus != nvml_bus || device != nvml_device ||
+            function != nvml_function) continue;
+        if (match >= 0) return -1;
+        match = (int)i;
+    }
+    return match;
+}
+
+static void cupti_update(CuptiStats *c, const GpuStats *gpu, unsigned int gpu_count) {
+    memset(c, 0, sizeof(*c) * gpu_count);
+    const char *path = getenv("GPUMON_CUPTI_REPORT_PATH");
+    if (!path || !*path) path = "/run/llama-cupti.json";
+    struct stat st;
+    if (stat(path, &st) != 0) return;
+    for (unsigned int i = 0; i < gpu_count; ++i) c[i].present = 1;
+    json_object *root = json_object_from_file(path);
+    if (!root) return;
+    json_object *v = NULL;
+    int schema_version = json_object_object_get_ex(root, "schema_version", &v) ? json_object_get_int(v) : 0;
+    int active_requests = json_object_object_get_ex(root, "active_requests", &v) ? json_object_get_int(v) : 0;
+    int ready = json_object_object_get_ex(root, "ready", &v) ? json_object_get_boolean(v) : 0;
+    int domains = json_object_object_get_ex(root, "event_domains", &v) ? json_object_get_int(v) : 0;
+    int metrics = json_object_object_get_ex(root, "metrics_available", &v) ? json_object_get_int(v) : 0;
+    if (!metrics && json_object_object_get_ex(root, "metrics", &v)) metrics = json_object_get_int(v);
+    const char *mode = json_object_object_get_ex(root, "collector_mode", &v) ? json_object_get_string(v) : "";
+    const char *detail = json_object_object_get_ex(root, "detail", &v) ? json_object_get_string(v) : "";
+    int sample_period_ms = 0;
+    json_object *rotation = NULL;
+    if (json_object_object_get_ex(root, "rotation", &rotation) &&
+        json_object_object_get_ex(rotation, "sample_period_ms", &v))
+        sample_period_ms = json_object_get_int(v);
+    for (unsigned int i = 0; i < gpu_count; ++i) {
+        c[i].schema_version = schema_version;
+        c[i].active_requests = active_requests;
+        c[i].sample_period_ms = sample_period_ms;
+        c[i].ready = ready; c[i].event_domains = domains; c[i].metrics_available = metrics;
+        snprintf(c[i].mode, sizeof(c[i].mode), "%s", mode);
+        snprintf(c[i].detail, sizeof(c[i].detail), "%s", detail);
+    }
+    if (schema_version != 3) {
+        json_object_put(root);
+        return;
+    }
+    json_object *devices = NULL;
+    if (json_object_object_get_ex(root, "devices", &devices) && json_object_is_type(devices, json_type_array)) {
+        size_t count = json_object_array_length(devices);
+        for (size_t i = 0; i < count; ++i) {
+            json_object *device = json_object_array_get_idx(devices, i), *pci = NULL, *device_samples = NULL;
+            if (!device || !json_object_is_type(device, json_type_object)) continue;
+            const char *pci_bus_id = json_object_object_get_ex(device, "pci_bus_id", &pci) &&
+                                     json_object_is_type(pci, json_type_string)
+                ? json_object_get_string(pci) : "";
+            int index = nvml_index_for_pci_bus_id(gpu, gpu_count, pci_bus_id);
+            /* A one-device report and one-device NVML host are unambiguous even
+             * for older schema-3 producers which omitted pci_bus_id. */
+            if (index < 0 && gpu_count == 1 && count == 1 && !*pci_bus_id) index = 0;
+            if (index < 0 || (unsigned int)index >= gpu_count) continue;
+            c[index].valid = 1;
+            snprintf(c[index].pci_bus_id, sizeof(c[index].pci_bus_id), "%s", pci_bus_id);
+            if (json_object_object_get_ex(device, "ready", &v)) c[index].ready = json_object_get_boolean(v);
+            if (json_object_object_get_ex(device, "event_domains", &v)) c[index].event_domains = json_object_get_int(v);
+            if (json_object_object_get_ex(device, "metrics", &v)) c[index].metrics_available = json_object_get_int(v);
+            if (json_object_object_get_ex(device, "active_bank", &v))
+                snprintf(c[index].active_bank, sizeof(c[index].active_bank), "%s", json_object_get_string(v));
+            if (json_object_object_get_ex(device, "samples", &device_samples))
+                cupti_samples_update(&c[index], device_samples);
+        }
+    }
+    json_object_put(root);
+}
+
+static json_object *cupti_metric_json(const CuptiStats *stats, const CuptiMetric *metric) {
+    json_object *out = json_object_new_object();
+    const char *state = cupti_metric_state(stats, metric);
+    json_object_object_add(out, "available", json_object_new_boolean(metric->available));
+    json_object_object_add(out, "valid", json_object_new_boolean(metric->valid));
+    json_object_object_add(out, "enabled", json_object_new_boolean(metric->enabled));
+    json_object_object_add(out, "disabled", json_object_new_boolean(metric->disabled));
+    json_object_object_add(out, "bank", json_object_new_string(metric->bank));
+    json_object_object_add(out, "valueKind", json_object_new_string(metric->value_kind));
+    json_object_object_add(out, "unit", json_object_new_string(metric->unit));
+    json_object_object_add(out, "simultaneousWithOtherMetrics", json_object_new_boolean(metric->simultaneous));
+    json_object_object_add(out, "state", json_object_new_string(state));
+    json_object_object_add(out, "current", json_object_new_boolean(strcmp(state, "live") == 0));
+    json_object_object_add(out, "sampledAtUnixMs", json_object_new_int64(metric->sampled_at_unix_ms));
+    json_object_object_add(out, "ageMs", json_object_new_int64(cupti_metric_age_ms(metric)));
+    json_object_object_add(out, "windowNs", json_object_new_int64(metric->window_ns));
+    if (metric->valid) json_object_object_add(out, "value", json_object_new_double(metric->value));
+    else json_object_object_add(out, "value", json_object_new_null());
+    return out;
+}
+
+
+static json_object *cupti_current_value_json(const CuptiStats *stats,
+                                             const CuptiMetric *metric,
+                                             double scale) {
+    if (strcmp(cupti_metric_state(stats, metric), "live") != 0)
+        return json_object_new_null();
+    return json_object_new_double(metric->value * scale);
+}
+
 static void print_json_snapshot(const GpuStats *gpu, unsigned int gpu_count,
-                                const OllamaStats *o) {
+                                const OllamaStats *o, const CuptiStats *cupti) {
     json_object *root = json_object_new_object();
     json_object *gpus = json_object_new_array();
     for (unsigned int i = 0; i < gpu_count; i++) {
@@ -1258,6 +1535,7 @@ static void print_json_snapshot(const GpuStats *gpu, unsigned int gpu_count,
         json_object *item = json_object_new_object();
         json_object_object_add(item, "index", json_object_new_int((int)i));
         json_object_object_add(item, "name", json_object_new_string(g->name));
+        json_object_object_add(item, "pciBusId", json_object_new_string(g->pci_bus_id));
         json_object_object_add(item, "gpuUtil", json_object_new_int((int)g->gpu_util));
         json_object_object_add(item, "memoryUtil", json_object_new_int((int)g->mem_util));
         json_object_object_add(item, "vramUsedBytes", json_object_new_int64((int64_t)g->mem_used));
@@ -1274,6 +1552,51 @@ static void print_json_snapshot(const GpuStats *gpu, unsigned int gpu_count,
         json_object_object_add(item, "pcieWidth", json_object_new_int((int)g->pcie_width));
         json_object_object_add(item, "pcieRxMBps", json_object_new_double(g->rx_MBps));
         json_object_object_add(item, "pcieTxMBps", json_object_new_double(g->tx_MBps));
+        const CuptiStats *cg = &cupti[i];
+        json_object *gpu_cupti = json_object_new_object();
+        json_object_object_add(gpu_cupti, "present", json_object_new_boolean(cg->present));
+        json_object_object_add(gpu_cupti, "valid", json_object_new_boolean(cg->valid));
+        json_object_object_add(gpu_cupti, "ready", json_object_new_boolean(cg->ready));
+        json_object_object_add(gpu_cupti, "schemaVersion", json_object_new_int(cg->schema_version));
+        json_object_object_add(gpu_cupti, "activeRequests", json_object_new_int(cg->active_requests));
+        json_object_object_add(gpu_cupti, "activeBank", json_object_new_string(cg->active_bank));
+        json_object_object_add(gpu_cupti, "reportPciBusId", json_object_new_string(cg->pci_bus_id));
+        json_object_object_add(gpu_cupti, "state", json_object_new_string(cupti_bank_state(cg)));
+        json_object_object_add(gpu_cupti, "samplePeriodMs", json_object_new_int(cg->sample_period_ms));
+        json_object_object_add(gpu_cupti, "eventDomains", json_object_new_int(cg->event_domains));
+        json_object_object_add(gpu_cupti, "metricsAvailable", json_object_new_int(cg->metrics_available));
+        json_object_object_add(gpu_cupti, "collectorMode", json_object_new_string(cg->mode));
+        json_object_object_add(gpu_cupti, "smEfficiencyValid", json_object_new_boolean(cg->sm.valid));
+        json_object_object_add(gpu_cupti, "smEfficiencyCurrent", json_object_new_boolean(strcmp(cupti_metric_state(cg, &cg->sm), "live") == 0));
+        json_object_object_add(gpu_cupti, "smEfficiencyPct", cupti_current_value_json(cg, &cg->sm, 1.0));
+        json_object_object_add(gpu_cupti, "achievedOccupancyValid", json_object_new_boolean(cg->occ.valid));
+        json_object_object_add(gpu_cupti, "achievedOccupancyCurrent", json_object_new_boolean(strcmp(cupti_metric_state(cg, &cg->occ), "live") == 0));
+        json_object_object_add(gpu_cupti, "achievedOccupancyPct", cupti_current_value_json(cg, &cg->occ, 100.0));
+        json_object_object_add(gpu_cupti, "ipcValid", json_object_new_boolean(cg->ipc.valid));
+        json_object_object_add(gpu_cupti, "ipcCurrent", json_object_new_boolean(strcmp(cupti_metric_state(cg, &cg->ipc), "live") == 0));
+        json_object_object_add(gpu_cupti, "ipc", cupti_current_value_json(cg, &cg->ipc, 1.0));
+        json_object_object_add(gpu_cupti, "dramReadValid", json_object_new_boolean(cg->dram_read.valid));
+        json_object_object_add(gpu_cupti, "dramReadCurrent", json_object_new_boolean(strcmp(cupti_metric_state(cg, &cg->dram_read), "live") == 0));
+        json_object_object_add(gpu_cupti, "dramReadBytesPerSecond", cupti_current_value_json(cg, &cg->dram_read, 1.0));
+        json_object_object_add(gpu_cupti, "dramWriteValid", json_object_new_boolean(cg->dram_write.valid));
+        json_object_object_add(gpu_cupti, "dramWriteCurrent", json_object_new_boolean(strcmp(cupti_metric_state(cg, &cg->dram_write), "live") == 0));
+        json_object_object_add(gpu_cupti, "dramWriteBytesPerSecond", cupti_current_value_json(cg, &cg->dram_write, 1.0));
+        json_object_object_add(gpu_cupti, "dramUtilizationValid", json_object_new_boolean(cg->dram_level.valid));
+        json_object_object_add(gpu_cupti, "dramUtilizationCurrent", json_object_new_boolean(strcmp(cupti_metric_state(cg, &cg->dram_level), "live") == 0));
+        json_object_object_add(gpu_cupti, "dramUtilizationLevel", cupti_current_value_json(cg, &cg->dram_level, 1.0));
+        json_object_object_add(gpu_cupti, "tensorFuUtilizationValid", json_object_new_boolean(cg->tensor.valid));
+        json_object_object_add(gpu_cupti, "tensorFuUtilizationCurrent", json_object_new_boolean(strcmp(cupti_metric_state(cg, &cg->tensor), "live") == 0));
+        json_object_object_add(gpu_cupti, "tensorFuUtilizationLevel", cupti_current_value_json(cg, &cg->tensor, 1.0));
+        json_object *samples = json_object_new_object();
+        json_object_object_add(samples, "smEfficiency", cupti_metric_json(cg, &cg->sm));
+        json_object_object_add(samples, "achievedOccupancy", cupti_metric_json(cg, &cg->occ));
+        json_object_object_add(samples, "ipc", cupti_metric_json(cg, &cg->ipc));
+        json_object_object_add(samples, "dramReadThroughput", cupti_metric_json(cg, &cg->dram_read));
+        json_object_object_add(samples, "dramWriteThroughput", cupti_metric_json(cg, &cg->dram_write));
+        json_object_object_add(samples, "dramUtilization", cupti_metric_json(cg, &cg->dram_level));
+        json_object_object_add(samples, "tensorFuUtilization", cupti_metric_json(cg, &cg->tensor));
+        json_object_object_add(gpu_cupti, "samples", samples);
+        json_object_object_add(item, "cupti", gpu_cupti);
         json_object_array_add(gpus, item);
     }
     json_object_object_add(root, "gpus", gpus);
@@ -1306,6 +1629,26 @@ static void print_json_snapshot(const GpuStats *gpu, unsigned int gpu_count,
     json_object_object_add(runtime, "kvV", json_object_new_string(o->kv_v));
     json_object_object_add(runtime, "event", json_object_new_string(o->last_event));
     json_object_object_add(root, "runtime", runtime);
+    json_object *cup = json_object_new_object();
+    json_object_object_add(cup, "present", json_object_new_boolean(cupti->present));
+    json_object_object_add(cup, "valid", json_object_new_boolean(cupti->valid));
+    json_object_object_add(cup, "ready", json_object_new_boolean(cupti->ready));
+    json_object_object_add(cup, "schemaVersion", json_object_new_int(cupti->schema_version));
+    json_object_object_add(cup, "activeRequests", json_object_new_int(cupti->active_requests));
+    json_object_object_add(cup, "activeBank", json_object_new_string(cupti->active_bank));
+    json_object_object_add(cup, "state", json_object_new_string(cupti_bank_state(cupti)));
+    json_object_object_add(cup, "samplePeriodMs", json_object_new_int(cupti->sample_period_ms));
+    json_object_object_add(cup, "eventDomains", json_object_new_int(cupti->event_domains));
+    json_object_object_add(cup, "metricsAvailable", json_object_new_int(cupti->metrics_available));
+    json_object_object_add(cup, "collectorMode", json_object_new_string(cupti->mode));
+    json_object_object_add(cup, "smEfficiencyPct", cupti_current_value_json(cupti, &cupti->sm, 1.0));
+    json_object_object_add(cup, "achievedOccupancyPct", cupti_current_value_json(cupti, &cupti->occ, 100.0));
+    json_object_object_add(cup, "ipc", cupti_current_value_json(cupti, &cupti->ipc, 1.0));
+    json_object_object_add(cup, "dramReadBytesPerSecond", cupti_current_value_json(cupti, &cupti->dram_read, 1.0));
+    json_object_object_add(cup, "dramWriteBytesPerSecond", cupti_current_value_json(cupti, &cupti->dram_write, 1.0));
+    json_object_object_add(cup, "dramUtilizationLevel", cupti_current_value_json(cupti, &cupti->dram_level, 1.0));
+    json_object_object_add(cup, "tensorFuUtilizationLevel", cupti_current_value_json(cupti, &cupti->tensor, 1.0));
+    json_object_object_add(root, "cupti", cup);
     puts(json_object_to_json_string_ext(root, JSON_C_TO_STRING_PLAIN));
     json_object_put(root);
 }
@@ -1339,8 +1682,54 @@ static void bar_line(int row, int col, int width, const char *label,
     if (suffix) printw(" %s", suffix);
 }
 
-static void draw_gpu(int row, int col, int width, int idx, const GpuStats *g) {
+static void format_metric_value(char *out, size_t out_size, const CuptiMetric *metric,
+                                double scale, const char *format) {
+    if (!metric->valid) snprintf(out, out_size, "n/a");
+    else snprintf(out, out_size, format, metric->value * scale);
+}
+
+static void draw_gpu(int row, int col, int width, int idx, const GpuStats *g,
+                     const CuptiStats *cupti, int cupti_page) {
     char suf[128];
+
+    char core_age[16], hbm_age[16], tensor_age[16];
+    char sm[24], occ[24], ipc[24], hbm_read[24], hbm_write[24], dram[24], tensor[24];
+    format_age(core_age, sizeof(core_age), cupti_metric_age_ms(&cupti->sm));
+    format_age(hbm_age, sizeof(hbm_age), cupti_metric_age_ms(&cupti->dram_read));
+    format_age(tensor_age, sizeof(tensor_age), cupti_metric_age_ms(&cupti->tensor));
+    format_metric_value(sm, sizeof(sm), &cupti->sm, 1.0, "%.1f%%");
+    format_metric_value(occ, sizeof(occ), &cupti->occ, 100.0, "%.1f%%");
+    format_metric_value(ipc, sizeof(ipc), &cupti->ipc, 1.0, "%.2f");
+    format_metric_value(hbm_read, sizeof(hbm_read), &cupti->dram_read, 1e-9, "%.1f");
+    format_metric_value(hbm_write, sizeof(hbm_write), &cupti->dram_write, 1e-9, "%.1f");
+    format_metric_value(dram, sizeof(dram), &cupti->dram_level, 1.0, "%.0f/10");
+    format_metric_value(tensor, sizeof(tensor), &cupti->tensor, 1.0, "%.0f/10");
+
+    if (cupti_page) {
+        mvprintw(row++, col, "GPU %d  %s", idx, g->name);
+        mvprintw(row++, col, "LOAD    GPU %u%%  MEM CTRL %u%%  VRAM %.2f/%.2f GiB",
+                 g->gpu_util, g->mem_util, bytes_to_gib(g->mem_used), bytes_to_gib(g->mem_total));
+        mvprintw(row++, col, "STATE   %.1f/%.1f W  GPU %u C  HBM %u/%u C  %u/%u MHz",
+                 g->power_mw / 1000.0, g->power_limit_mw / 1000.0,
+                 g->temp, g->memory_temp, g->memory_max_temp, g->sm_clock, g->mem_clock);
+        if (cupti->valid)
+            mvprintw(row++, col, "CUPTI   %-5s bank %-9s req %d  period %d ms",
+                     cupti_bank_state_upper(cupti),
+                     cupti->active_bank[0] ? cupti->active_bank : "n/a",
+                     cupti->active_requests, cupti->sample_period_ms);
+        else if (cupti->present)
+            mvprintw(row++, col, "CUPTI   unsupported/invalid schema %d", cupti->schema_version);
+        else
+            mvprintw(row++, col, "CUPTI   no report at /run/llama-cupti.json");
+        mvprintw(row++, col, "CORE    %-11s %6s  SM %s  OCC %s  IPC %s",
+                 cupti_metric_state(cupti, &cupti->sm), core_age, sm, occ, ipc);
+        mvprintw(row++, col, "HBM     %-11s %6s  R %s W %s GB/s  DRAM %s",
+                 cupti_metric_state(cupti, &cupti->dram_read), hbm_age,
+                 hbm_read, hbm_write, dram);
+        mvprintw(row++, col, "TENSOR  %-11s %6s  utilization %s",
+                 cupti_metric_state(cupti, &cupti->tensor), tensor_age, tensor);
+        return;
+    }
 
     mvprintw(row++, col, "GPU %d  %s", idx, g->name);
 
@@ -1358,10 +1747,18 @@ static void draw_gpu(int row, int col, int width, int idx, const GpuStats *g) {
     snprintf(suf, sizeof(suf), "%.1f/%.1f W", g->power_mw / 1000.0, g->power_limit_mw / 1000.0);
     bar_line(row++, col, width, "POWER", ppct, suf);
 
-    mvprintw(row++, col, "TEMP    GPU %u C  HBM %u/%u C  CLOCK %u MHz  MEM %u MHz  P%d",
+    mvprintw(row++, col, "TEMP GPU %u C HBM %u/%u C  CLK %u MEM %u MHz P%d THR 0x%llx",
              g->temp, g->memory_temp, g->memory_max_temp,
-             g->sm_clock, g->mem_clock, (int)g->pstate);
-    mvprintw(row++, col, "THROTTLE mask 0x%llx", g->throttle_reasons);
+             g->sm_clock, g->mem_clock, (int)g->pstate, g->throttle_reasons);
+    if (!cupti->valid)
+        mvprintw(row++, col, "CUPTI   unavailable/schema %d  c=details", cupti->schema_version);
+    else if (strcmp(cupti->active_bank, "tensor") == 0)
+        mvprintw(row++, col, "CUPTI   %-5s tensor %6s  TENSOR %s  c=details",
+                 cupti_bank_state_upper(cupti), tensor_age, tensor);
+    else
+        mvprintw(row++, col, "CUPTI   %-5s core %6s  SM %s  HBM R %s W %s GB/s",
+                 cupti_bank_state_upper(cupti), core_age,
+                 sm, hbm_read, hbm_write);
 
     mvprintw(row++, col, "PCIe    Gen%u x%u  (max Gen%u x%u)  ~%.0f MB/s each direction",
              g->pcie_gen, g->pcie_width, g->pcie_gen_max, g->pcie_width_max,
@@ -1582,11 +1979,15 @@ int main(int argc, char **argv) {
     if (gpu_count > MAX_GPUS) gpu_count = MAX_GPUS;
 
     GpuStats gpu[MAX_GPUS];
+    CuptiStats cupti[MAX_GPUS];
     memset(gpu, 0, sizeof(gpu));
 
     for (unsigned int i = 0; i < gpu_count; i++) {
         nvmlDeviceGetHandleByIndex_v2(i, &gpu[i].h);
         nvmlDeviceGetName(gpu[i].h, gpu[i].name, sizeof(gpu[i].name));
+        nvmlPciInfo_t pci = {0};
+        if (nvmlDeviceGetPciInfo_v3(gpu[i].h, &pci) == NVML_SUCCESS)
+            snprintf(gpu[i].pci_bus_id, sizeof(gpu[i].pci_bus_id), "%s", pci.busId);
     }
 
     sd_journal *journal = NULL;
@@ -1604,7 +2005,8 @@ int main(int argc, char **argv) {
 
     if (json_output) {
         for (unsigned int i = 0; i < gpu_count; i++) gpu_update(&gpu[i], 1);
-        print_json_snapshot(gpu, gpu_count, &ollama);
+        cupti_update(cupti, gpu, gpu_count);
+        print_json_snapshot(gpu, gpu_count, &ollama, cupti);
         if (journal) sd_journal_close(journal);
         nvmlShutdown();
         curl_global_cleanup();
@@ -1634,11 +2036,13 @@ int main(int argc, char **argv) {
     uint64_t tick = 0;
     int ps_every = 1000 / interval_ms;
     if (ps_every < 1) ps_every = 1;
+    int cupti_page = 0;
 
     while (!g_stop) {
         int ch = getch();
         if (ch == 'q' || ch == 'Q') break;
         int source_changed = 0;
+        if (ch == 'c' || ch == 'C') cupti_page = !cupti_page;
         if (ch == 't' || ch == 'T') {
             backend_mode = (BackendMode)((backend_mode + 1) % 3);
             source_changed = select_backend(&ollama, backend_mode,
@@ -1684,6 +2088,7 @@ int main(int argc, char **argv) {
 
         for (unsigned int i = 0; i < gpu_count; i++)
             gpu_update(&gpu[i], hist_target);
+        cupti_update(cupti, gpu, gpu_count);
 
         erase();
 
@@ -1693,22 +2098,24 @@ int main(int argc, char **argv) {
         if (width > 140) width = 140;
 
         if (has_colors()) attron(COLOR_PAIR(4) | A_BOLD);
-        mvprintw(0, 1, "gpumon + %s   source=%s   refresh=%dms   q=quit r=reset t=source",
+        mvprintw(0, 1, "gpumon + %s   source=%s   refresh=%dms   q=quit r=reset t=source c=%s",
                  strcmp(ollama.backend, "LLAMA") == 0 ? "llama-server" : "ollama",
-                 backend_mode_name(backend_mode), interval_ms);
+                 backend_mode_name(backend_mode), interval_ms,
+                 cupti_page ? "summary" : "cupti");
         if (has_colors()) attroff(COLOR_PAIR(4) | A_BOLD);
 
         int gpu_columns = (cols >= 100 && gpu_count > 1) ? 2 : 1;
         int gpu_width = gpu_columns == 2 ? (cols - 3) / 2 : width;
         if (gpu_width > 70) gpu_width = 70;
+        int gpu_block_rows = cupti_page ? 7 : 10;
         for (unsigned int i = 0; i < gpu_count; i++) {
-            int gpu_row = 2 + (int)(i / (unsigned int)gpu_columns) * 10;
+            int gpu_row = 2 + (int)(i / (unsigned int)gpu_columns) * gpu_block_rows;
             int gpu_col = 1 + (int)(i % (unsigned int)gpu_columns) * (gpu_width + 3);
-            if (gpu_row + 10 >= rows) break;
-            draw_gpu(gpu_row, gpu_col, gpu_width, i, &gpu[i]);
+            if (gpu_row + gpu_block_rows >= rows) break;
+            draw_gpu(gpu_row, gpu_col, gpu_width, i, &gpu[i], &cupti[i], cupti_page);
         }
         int gpu_rows = ((int)gpu_count + gpu_columns - 1) / gpu_columns;
-        int row = 2 + gpu_rows * 10;
+        int row = 2 + gpu_rows * gpu_block_rows;
 
         if (row + 11 < rows) {
             mvhline(row++, 1, ACS_HLINE, width > 1 ? width - 1 : 1);
