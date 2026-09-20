@@ -80,6 +80,7 @@ typedef struct {
     char mode[48];
     char active_bank[32];
     char pci_bus_id[32];
+    char mapping_source[32];
     char detail[160];
 } CuptiStats;
 
@@ -1378,7 +1379,8 @@ static int64_t cupti_metric_age_ms(const CuptiMetric *metric) {
 }
 
 static const char *cupti_metric_state(const CuptiStats *stats, const CuptiMetric *metric) {
-    if (!metric || !metric->available || !metric->valid) return "unavailable";
+    if (!metric || !metric->available) return "unsupported";
+    if (!metric->valid) return "waiting";
     if (stats->active_requests == 0 || !metric->enabled) return "hold";
     int64_t age = cupti_metric_age_ms(metric);
     int64_t stale_after = stats->sample_period_ms > 0 ? (int64_t)stats->sample_period_ms * 3 : 1000;
@@ -1397,6 +1399,17 @@ static const char *cupti_bank_state_upper(const CuptiStats *stats) {
     if (strcmp(state, "live") == 0) return "LIVE";
     if (strcmp(state, "stale") == 0) return "STALE";
     if (strcmp(state, "hold") == 0) return "HOLD";
+    if (strcmp(state, "waiting") == 0) return "WAIT";
+    return "N/A";
+}
+
+static const char *cupti_metric_state_upper(const CuptiStats *stats,
+                                            const CuptiMetric *metric) {
+    const char *state = cupti_metric_state(stats, metric);
+    if (strcmp(state, "live") == 0) return "LIVE";
+    if (strcmp(state, "hold") == 0) return "HOLD";
+    if (strcmp(state, "waiting") == 0) return "WAIT";
+    if (strcmp(state, "stale") == 0) return "STALE";
     return "N/A";
 }
 
@@ -1433,7 +1446,99 @@ static int nvml_index_for_pci_bus_id(const GpuStats *gpu, unsigned int gpu_count
     return match;
 }
 
-static void cupti_update(CuptiStats *c, const GpuStats *gpu, unsigned int gpu_count) {
+static int process_env_value(long pid, const char *name, char *out, size_t out_size) {
+    if (pid <= 0 || !name || !*name || !out || out_size == 0) return 0;
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%ld/environ", pid);
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return 0;
+    char *entry = NULL;
+    size_t capacity = 0;
+    const size_t name_len = strlen(name);
+    int found = 0;
+    while (getdelim(&entry, &capacity, '\0', fp) >= 0) {
+        if (strncmp(entry, name, name_len) != 0 || entry[name_len] != '=') continue;
+        snprintf(out, out_size, "%s", entry + name_len + 1);
+        found = 1;
+        break;
+    }
+    free(entry);
+    fclose(fp);
+    return found;
+}
+
+static int gpu_pci_compare(const void *left, const void *right, void *opaque) {
+    const GpuStats *gpu = opaque;
+    unsigned int li = *(const unsigned int *)left, ri = *(const unsigned int *)right;
+    unsigned int ld, lb, ldev, lf, rd, rb, rdev, rf;
+    if (!parse_pci_bus_id(gpu[li].pci_bus_id, &ld, &lb, &ldev, &lf)) return 1;
+    if (!parse_pci_bus_id(gpu[ri].pci_bus_id, &rd, &rb, &rdev, &rf)) return -1;
+    if (ld != rd) return ld < rd ? -1 : 1;
+    if (lb != rb) return lb < rb ? -1 : 1;
+    if (ldev != rdev) return ldev < rdev ? -1 : 1;
+    if (lf != rf) return lf < rf ? -1 : 1;
+    return 0;
+}
+
+static int cuda_visible_ordinal_map(long llama_pid, const GpuStats *gpu,
+                                    unsigned int gpu_count, int *map,
+                                    size_t map_capacity) {
+    if (!gpu || !gpu_count || !map || map_capacity == 0 || gpu_count > MAX_GPUS)
+        return 0;
+    char visible[256] = {0}, order[64] = {0};
+    const char *override = getenv("GPUMON_CUDA_VISIBLE_DEVICES");
+    if (override && *override) snprintf(visible, sizeof(visible), "%s", override);
+    else (void)process_env_value(llama_pid, "CUDA_VISIBLE_DEVICES", visible, sizeof(visible));
+    const char *order_override = getenv("GPUMON_CUDA_DEVICE_ORDER");
+    if (order_override && *order_override) snprintf(order, sizeof(order), "%s", order_override);
+    else if (!process_env_value(llama_pid, "CUDA_DEVICE_ORDER", order, sizeof(order)))
+        return 0;
+    /* Numeric CUDA ordinals are only safely relatable to NVML after explicitly
+     * ordering the physical devices by PCI address. UUID and MIG selectors are
+     * intentionally rejected rather than guessed. */
+    if (strcmp(order, "PCI_BUS_ID") != 0) return 0;
+
+    unsigned int pci_order[MAX_GPUS];
+    for (unsigned int i = 0; i < gpu_count; ++i) {
+        unsigned int domain, bus, device, function;
+        if (!parse_pci_bus_id(gpu[i].pci_bus_id, &domain, &bus, &device, &function))
+            return 0;
+        pci_order[i] = i;
+    }
+    qsort_r(pci_order, gpu_count, sizeof(pci_order[0]), gpu_pci_compare, (void *)gpu);
+
+    /* With PCI ordering explicitly requested and no visibility filter, CUDA
+     * exposes every physical GPU in the sorted PCI order. */
+    if (!visible[0]) {
+        if (gpu_count > map_capacity) return 0;
+        for (unsigned int i = 0; i < gpu_count; ++i) map[i] = (int)pci_order[i];
+        return (int)gpu_count;
+    }
+
+    char *copy = strdup(visible), *save = NULL;
+    if (!copy) return 0;
+    int count = 0;
+    for (char *token = strtok_r(copy, ",", &save); token;
+         token = strtok_r(NULL, ",", &save)) {
+        if ((size_t)count >= map_capacity) { count = 0; break; }
+        errno = 0;
+        char *end = NULL;
+        long physical = strtol(token, &end, 10);
+        if (errno || end == token || *end != '\0' || physical < 0 ||
+            (unsigned long)physical >= gpu_count) { count = 0; break; }
+        int nvml_index = (int)pci_order[physical];
+        for (int i = 0; i < count; ++i) {
+            if (map[i] == nvml_index) { count = 0; break; }
+        }
+        if (count == 0 && token != copy) break;
+        map[count++] = nvml_index;
+    }
+    free(copy);
+    return count;
+}
+
+static void cupti_update(CuptiStats *c, const GpuStats *gpu, unsigned int gpu_count,
+                         long llama_pid) {
     memset(c, 0, sizeof(*c) * gpu_count);
     const char *path = getenv("GPUMON_CUPTI_REPORT_PATH");
     if (!path || !*path) path = "/run/llama-cupti.json";
@@ -1471,19 +1576,37 @@ static void cupti_update(CuptiStats *c, const GpuStats *gpu, unsigned int gpu_co
     json_object *devices = NULL;
     if (json_object_object_get_ex(root, "devices", &devices) && json_object_is_type(devices, json_type_array)) {
         size_t count = json_object_array_length(devices);
+        int ordinal_map[MAX_GPUS] = {0};
+        int ordinal_count = cuda_visible_ordinal_map(llama_pid, gpu, gpu_count,
+                                                     ordinal_map, MAX_GPUS);
         for (size_t i = 0; i < count; ++i) {
-            json_object *device = json_object_array_get_idx(devices, i), *pci = NULL, *device_samples = NULL;
+            json_object *device = json_object_array_get_idx(devices, i), *pci = NULL,
+                        *ordinal_value = NULL, *device_samples = NULL;
             if (!device || !json_object_is_type(device, json_type_object)) continue;
             const char *pci_bus_id = json_object_object_get_ex(device, "pci_bus_id", &pci) &&
                                      json_object_is_type(pci, json_type_string)
                 ? json_object_get_string(pci) : "";
             int index = nvml_index_for_pci_bus_id(gpu, gpu_count, pci_bus_id);
+            const char *mapping_source = index >= 0 ? "pci_bus_id" : "";
+            int ordinal = json_object_object_get_ex(device, "ordinal", &ordinal_value)
+                ? json_object_get_int(ordinal_value) : (int)i;
+            if (index < 0 && !*pci_bus_id && ordinal_count == (int)count &&
+                ordinal >= 0 && ordinal < ordinal_count) {
+                index = ordinal_map[ordinal];
+                mapping_source = "cuda_visible_devices";
+            }
             /* A one-device report and one-device NVML host are unambiguous even
              * for older schema-3 producers which omitted pci_bus_id. */
-            if (index < 0 && gpu_count == 1 && count == 1 && !*pci_bus_id) index = 0;
+            if (index < 0 && gpu_count == 1 && count == 1 && !*pci_bus_id) {
+                index = 0;
+                mapping_source = "single_device";
+            }
             if (index < 0 || (unsigned int)index >= gpu_count) continue;
             c[index].valid = 1;
-            snprintf(c[index].pci_bus_id, sizeof(c[index].pci_bus_id), "%s", pci_bus_id);
+            snprintf(c[index].pci_bus_id, sizeof(c[index].pci_bus_id), "%s",
+                     *pci_bus_id ? pci_bus_id : gpu[index].pci_bus_id);
+            snprintf(c[index].mapping_source, sizeof(c[index].mapping_source), "%s",
+                     mapping_source);
             if (json_object_object_get_ex(device, "ready", &v)) c[index].ready = json_object_get_boolean(v);
             if (json_object_object_get_ex(device, "event_domains", &v)) c[index].event_domains = json_object_get_int(v);
             if (json_object_object_get_ex(device, "metrics", &v)) c[index].metrics_available = json_object_get_int(v);
@@ -1561,6 +1684,7 @@ static void print_json_snapshot(const GpuStats *gpu, unsigned int gpu_count,
         json_object_object_add(gpu_cupti, "activeRequests", json_object_new_int(cg->active_requests));
         json_object_object_add(gpu_cupti, "activeBank", json_object_new_string(cg->active_bank));
         json_object_object_add(gpu_cupti, "reportPciBusId", json_object_new_string(cg->pci_bus_id));
+        json_object_object_add(gpu_cupti, "mappingSource", json_object_new_string(cg->mapping_source));
         json_object_object_add(gpu_cupti, "state", json_object_new_string(cupti_bank_state(cg)));
         json_object_object_add(gpu_cupti, "samplePeriodMs", json_object_new_int(cg->sample_period_ms));
         json_object_object_add(gpu_cupti, "eventDomains", json_object_new_int(cg->event_domains));
@@ -1682,6 +1806,35 @@ static void bar_line(int row, int col, int width, const char *label,
     if (suffix) printw(" %s", suffix);
 }
 
+static void metric_slider_line(int row, int col, int width, const char *label,
+                               const CuptiStats *stats, const CuptiMetric *metric,
+                               double pct, const char *value, const char *detail) {
+    const char *state = cupti_metric_state_upper(stats, metric);
+    char right[160];
+    if (metric && metric->valid)
+        snprintf(right, sizeof(right), "%s  %-5s%s%s", value, state,
+                 detail && *detail ? "  " : "", detail && *detail ? detail : "");
+    else
+        snprintf(right, sizeof(right), "%-5s  %s", state,
+                 metric && metric->available ? "awaiting first sample" : "not supported");
+
+    int barw = width - 13 - (int)strlen(right);
+    if (barw < 6) barw = 6;
+    if (barw > 24) barw = 24;
+    mvprintw(row, col, "%-10s [", label);
+    if (!metric || !metric->valid) {
+        for (int i = 0; i < barw; ++i) addch('-');
+    } else {
+        pct = clamp_pct(pct);
+        int fill = (int)llround(pct / 100.0 * barw);
+        int cp = pct_color(pct);
+        if (cp) attron(COLOR_PAIR(cp));
+        for (int i = 0; i < barw; ++i) addch(i < fill ? '#' : '.');
+        if (cp) attroff(COLOR_PAIR(cp));
+    }
+    printw("] %s", right);
+}
+
 static void format_metric_value(char *out, size_t out_size, const CuptiMetric *metric,
                                 double scale, const char *format) {
     if (!metric->valid) snprintf(out, out_size, "n/a");
@@ -1692,10 +1845,9 @@ static void draw_gpu(int row, int col, int width, int idx, const GpuStats *g,
                      const CuptiStats *cupti, int cupti_page) {
     char suf[128];
 
-    char core_age[16], hbm_age[16], tensor_age[16];
+    char core_age[16], tensor_age[16];
     char sm[24], occ[24], ipc[24], hbm_read[24], hbm_write[24], dram[24], tensor[24];
     format_age(core_age, sizeof(core_age), cupti_metric_age_ms(&cupti->sm));
-    format_age(hbm_age, sizeof(hbm_age), cupti_metric_age_ms(&cupti->dram_read));
     format_age(tensor_age, sizeof(tensor_age), cupti_metric_age_ms(&cupti->tensor));
     format_metric_value(sm, sizeof(sm), &cupti->sm, 1.0, "%.1f%%");
     format_metric_value(occ, sizeof(occ), &cupti->occ, 100.0, "%.1f%%");
@@ -1706,28 +1858,36 @@ static void draw_gpu(int row, int col, int width, int idx, const GpuStats *g,
     format_metric_value(tensor, sizeof(tensor), &cupti->tensor, 1.0, "%.0f/10");
 
     if (cupti_page) {
-        mvprintw(row++, col, "GPU %d  %s", idx, g->name);
-        mvprintw(row++, col, "LOAD    GPU %u%%  MEM CTRL %u%%  VRAM %.2f/%.2f GiB",
-                 g->gpu_util, g->mem_util, bytes_to_gib(g->mem_used), bytes_to_gib(g->mem_total));
-        mvprintw(row++, col, "STATE   %.1f/%.1f W  GPU %u C  HBM %u/%u C  %u/%u MHz",
-                 g->power_mw / 1000.0, g->power_limit_mw / 1000.0,
-                 g->temp, g->memory_temp, g->memory_max_temp, g->sm_clock, g->mem_clock);
-        if (cupti->valid)
-            mvprintw(row++, col, "CUPTI   %-5s bank %-9s req %d  period %d ms",
-                     cupti_bank_state_upper(cupti),
-                     cupti->active_bank[0] ? cupti->active_bank : "n/a",
+        mvprintw(row++, col, "GPU %d  %s  | NVML load %u%%", idx, g->name, g->gpu_util);
+        if (cupti->valid) {
+            const char *measuring = strcmp(cupti->active_bank, "tensor") == 0
+                ? "Tensor Cores" : "Core + HBM";
+            mvprintw(row++, col, "CUPTI %-5s | measuring %-12s | requests %d | %d ms",
+                     cupti_bank_state_upper(cupti), measuring,
                      cupti->active_requests, cupti->sample_period_ms);
-        else if (cupti->present)
-            mvprintw(row++, col, "CUPTI   unsupported/invalid schema %d", cupti->schema_version);
-        else
-            mvprintw(row++, col, "CUPTI   no report at /run/llama-cupti.json");
-        mvprintw(row++, col, "CORE    %-11s %6s  SM %s  OCC %s  IPC %s",
-                 cupti_metric_state(cupti, &cupti->sm), core_age, sm, occ, ipc);
-        mvprintw(row++, col, "HBM     %-11s %6s  R %s W %s GB/s  DRAM %s",
-                 cupti_metric_state(cupti, &cupti->dram_read), hbm_age,
-                 hbm_read, hbm_write, dram);
-        mvprintw(row++, col, "TENSOR  %-11s %6s  utilization %s",
-                 cupti_metric_state(cupti, &cupti->tensor), tensor_age, tensor);
+        } else if (cupti->present) {
+            mvprintw(row++, col, "CUPTI N/A   | report present, GPU mapping/schema unavailable");
+        } else {
+            mvprintw(row++, col, "CUPTI N/A   | no report at /run/llama-cupti.json");
+        }
+
+        snprintf(suf, sizeof(suf), "sample %s", core_age);
+        metric_slider_line(row++, col, width, "SM ACTIVE", cupti, &cupti->sm,
+                           cupti->sm.value, sm, suf);
+        snprintf(suf, sizeof(suf), "IPC %s", ipc);
+        metric_slider_line(row++, col, width, "OCCUPANCY", cupti, &cupti->occ,
+                           cupti->occ.value * 100.0, occ, suf);
+        snprintf(suf, sizeof(suf), "R %s / W %s GB/s", hbm_read, hbm_write);
+        metric_slider_line(row++, col, width, "HBM LOAD", cupti, &cupti->dram_level,
+                           cupti->dram_level.value * 10.0, dram, suf);
+        snprintf(suf, sizeof(suf), "sample %s", tensor_age);
+        metric_slider_line(row++, col, width, "TENSOR", cupti, &cupti->tensor,
+                           cupti->tensor.value * 10.0, tensor, suf);
+        mvprintw(row++, col,
+                 "HEALTH     %.1f/%.1f W | GPU %u C | HBM %u/%u C | core/mem %u/%u MHz",
+                 g->power_mw / 1000.0, g->power_limit_mw / 1000.0,
+                 g->temp, g->memory_temp, g->memory_max_temp,
+                 g->sm_clock, g->mem_clock);
         return;
     }
 
@@ -2005,7 +2165,7 @@ int main(int argc, char **argv) {
 
     if (json_output) {
         for (unsigned int i = 0; i < gpu_count; i++) gpu_update(&gpu[i], 1);
-        cupti_update(cupti, gpu, gpu_count);
+        cupti_update(cupti, gpu, gpu_count, ollama.llama_pid);
         print_json_snapshot(gpu, gpu_count, &ollama, cupti);
         if (journal) sd_journal_close(journal);
         nvmlShutdown();
@@ -2088,7 +2248,7 @@ int main(int argc, char **argv) {
 
         for (unsigned int i = 0; i < gpu_count; i++)
             gpu_update(&gpu[i], hist_target);
-        cupti_update(cupti, gpu, gpu_count);
+        cupti_update(cupti, gpu, gpu_count, ollama.llama_pid);
 
         erase();
 
