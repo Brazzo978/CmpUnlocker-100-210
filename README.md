@@ -19,12 +19,6 @@ the exact hardware and software gates below. See [Disclosure boundary](DISCLOSUR
 | `10de:1db4` | Tesla V100 PCIe 16 GB | Already a V100; no CMP restriction to lift | Reference identity |
 | other | Other CMP or GV100 board | Not validated by this project | Not allow-listed |
 
-Only the `10de:1d84` software path is implemented by this repository. The
-`1df4` link points to an independent project, while both strap-mod entries are
-hardware conversions rather than features of this code. Read-only telemetry
-may return useful data on other NVML devices, but that does not make any write
-path supported. Do not bypass model, PCI-ID, firmware, driver, VBIOS, BDF or
-UUID gates.
 
 ## Deployment paths
 
@@ -53,14 +47,14 @@ for a device change. Use the exact tested baseline stated in each guide.
 
 | Area | Status | Tested result |
 | --- | --- | --- |
-| FP16 Tensor path | **Working on the tested baseline** | Two CMP100-210 GPUs reached median results of 74.179 and 75.040 TFLOPS on an `8192 x 8192` FP16 GEMM |
-| PCIe Gen2 | **Working on two tested x1 paths** | Both endpoints negotiated Gen2 x1; pinned 32 MiB transfers were approximately 417/419 MB/s versus a 207/209 MB/s stock-control measurement |
-| PCIe Gen3 | **Not achieved** | Making the software policy request Gen3 was insufficient: the endpoint continued to expose a 5 GT/s maximum and rejected the 8 GT/s target before any observable equalization |
-| PCIe width | **Still open** | Both tested cards remained x1, including behind Gen3 x8- and Gen3 x16-capable upstream paths; no x16 result is claimed |
-| NVML telemetry and HBM control | **Working on the tested baseline** | Headless NVML reads HBM temperature, 85 C threshold, clocks, power, memory and PCIe state; a UUID-targeted raw HBM offset of +138 read back as 877 MHz on the tested cards |
+| FP16 Tensor path | **Working** | Two CMP100-210 GPUs reached median results of 74.179 and 75.040 TFLOPS on an `8192 x 8192` FP16 GEMM |
+| PCIe Gen2 | **Working** | Both endpoints negotiated Gen2 x1; pinned 32 MiB transfers were approximately 417/419 MB/s versus a 207/209 MB/s stock-control measurement |
+| PCIe Gen3 | **Most probably HW fused** | No change can be applied , everything gets reverted to g2 , probably a fuse on the chip. |
+| PCIe width | **Help needed** | with a bios modification both card can achieve x16 (with added cap) but driver will not load refusing the gpu , also denuvo refuses |
+| NVML telemetry and HBM control | **Working on the tested baseline** | Custom rust binary to read telemetry and write offset to clock and stuff |
 
 All published interventions are volatile. Resetting or power-cycling restores
-the stock state.
+the stock state, except the x16 mod it doesnt work and i need help to get to the next stage, so that is not released.
 
 ## Evidence
 
@@ -73,46 +67,13 @@ the stock state.
 - [Captured Tensor benchmark output](results/tensor-benchmark.txt)
 - [Evidence checksums](results/SHA256SUMS)
 
-Operational components:
-
-- `install.sh` builds and installs the Tensor oneshot helper;
-- `install-pcie-guest.sh` builds and installs the separate Gen2 helper;
-- `tools/build_payloads.py` derives tested artifacts from exact, locally
-  installed NVIDIA firmware; no NVIDIA firmware blob is distributed;
-- `src/gv100_nouveau_acr_hook.c` is the narrow kernel hook used for the tested
-  Nouveau ACR handoff;
-- `scripts/cmp100-tensor-unlock` and `scripts/cmp100-pcie-gen2` implement the
-  fail-closed, volatile operations;
-- `tools/cmp100-nvml-clock-v2.rs` is the headless NVML telemetry/control
-  source; controls are UUID-targeted and dry-run unless `--apply` is supplied;
-- `tools/cupti_legacy_probe.c` is the non-mutating compatibility probe for a
-  locally installed legacy-capable CUPTI library;
-- `patches/llama.cpp/0001-server-add-optional-legacy-CUPTI-metric-collector.patch`
-  is the pinned, optional Unsloth `llama-server` instrumentation patch;
-- `tools/gpumon_v3_llama.c` is the terminal NVML monitor source, including
-  HBM temperature/threshold, clock-event reporting and schema-3 CUPTI input;
-- `install-monitoring.sh` builds and installs the Rust NVML helper and
-  `gpumon`, plus a disabled HBM boot unit, without changing GPU settings;
-- the Tensor, PCIe and HBM systemd units provide bounded manual execution and
-  optional boot integration. No installer enables them automatically;
-- the optional Proxmox coordinator verifies the physical root and endpoint
-  links and invokes the guest helper through QEMU Guest Agent only when needed.
-
-Validation components:
-
-- `tools/benchmark_tensor.py` runs a CUDA FP16 GEMM benchmark.
-- `tools/collect_state.sh` prints standard system, NVIDIA and PCIe state to
-  standard output.
-- `tools/check_public_boundary.py` enforces an exact public file allowlist and
-  rejects secrets, firmware blobs and unreviewed laboratory files.
-
 ## Validated software baseline
 
 - NVIDIA CMP 100-210 (`10de:1d84`);
-- NVIDIA driver `550.163.01`;
+- NVIDIA driver `550.163.01`(Users achieved it on newer driver too);
 - VBIOS `88.00.9D.00.00` for the named HBM profile;
 - CUDA `12.4` and PyTorch `2.6.0+cu124` for the captured Tensor result;
-- Debian GNU/Linux 13 for bare-metal and PCI-passthrough guest operation.
+- Debian GNU/Linux 13 for bare-metal and PCI-passthrough guest operation(Users achieved on ubuntu too).
 
 ## Safety and scope
 
@@ -123,10 +84,7 @@ payload, module or BDF checks. A failed operation can wedge the GPU until a
 guest or host reboot.
 
 Do not interpret the tested results as a guarantee that another PCB revision,
-firmware version, kernel or driver will behave identically. PCIe generation
-and width are independent properties: the Gen2 result does not imply x16
-support, and the negative Gen3 result does not prove the physical GV100 PHY
-incapable of 8 GT/s.
+firmware version, kernel or driver will behave identically.
 
 Please report new security-sensitive findings privately as described in
 [SECURITY.md](SECURITY.md). Do not attach NVIDIA firmware, VBIOS images,
