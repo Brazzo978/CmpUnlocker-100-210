@@ -1,6 +1,6 @@
 # PCIe Gen3 negative result
 
-## Conclusion
+## Conclusion (99% fused)
 
 PCIe Gen3 was not achieved through the tested volatile software-policy changes.
 The endpoint continued to expose a maximum link speed of 5 GT/s (Gen2), and its
@@ -28,11 +28,3 @@ attempt.
 ## What this does not prove
 
 - that the GV100 physical layer is fundamentally incapable of 8 GT/s;
-- whether the capability image originates in eFuse/OTP, straps, early firmware
-  initialization or hardwired product logic;
-- that a different board configuration or firmware would change the result;
-- that crossflashing another product's firmware is safe or sufficient.
-
-The most discriminating next measurement is an early, read-only comparison of
-the standard PCIe capabilities on a CMP100-210 and a genuine V100/GV100 before
-the vendor driver binds.
