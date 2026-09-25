@@ -25,6 +25,8 @@ and a usable CUDA device are separate outcomes.
 
 ## Where to read the evidence
 
+- [Campaign index](RESEARCH-CAMPAIGN-INDEX.md) maps all 74 archived notes to
+  their current public account, including superseded tests and plans.
 - [Tensor measurements](TENSOR-RESULTS.md), [PCIe Gen2](PCIE-RESULTS.md),
   [NVML/HBM](NVML-TELEMETRY-AND-CLOCKS.md), and [methodology](METHODOLOGY.md).
 - [Topology and SM investigation](TOPOLOGY-AND-SM-RESEARCH.md).

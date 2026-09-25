@@ -67,6 +67,7 @@ as a **private research release**, not in this public repository.
 ## Evidence
 
 - [Complete research status and capability matrix](docs/RESEARCH-STATUS-2026-09.md)
+- [Index of all 74 archived research and review notes](docs/RESEARCH-CAMPAIGN-INDEX.md)
 - [Topology and SM investigations](docs/TOPOLOGY-AND-SM-RESEARCH.md)
 - [Gen3 and PCIe width investigation](docs/PCIE-GEN3-AND-WIDTH-RESEARCH.md)
 - [ACR, PLM, Falcon, InfoROM and SPI findings](docs/FIRMWARE-AND-PRIVILEGE-RESEARCH.md)
