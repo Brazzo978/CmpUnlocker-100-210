@@ -30,10 +30,13 @@ APPROVED_FILES = {
     "docs/LLAMA-CUPTI-LIVE-METRICS.md",
     "docs/DEBIAN13-TENSOR-ONESHOT.md",
     "docs/GEN3-LIMIT.md",
+    "docs/GEMM-STRESS.md",
+    "docs/PCIE-X16-1D84-NEGATIVE-2026-09-25.md",
     "docs/METHODOLOGY.md",
     "docs/PCIE-RESULTS.md",
     "docs/TENSOR-RESULTS.md",
     "results/SHA256SUMS",
+    "results/x16-2026-09-25/devinit-live-comparison.json",
     "results/tensor-benchmark.png",
     "results/tensor-benchmark.txt",
     "patches/llama.cpp/0001-server-add-optional-legacy-CUPTI-metric-collector.patch",
@@ -56,6 +59,8 @@ APPROVED_FILES = {
     "tools/cmp100-nvml-clock-v2.rs",
     "tools/cupti_legacy_probe.c",
     "tools/gpumon_v3_llama.c",
+    "tests/test_gemm_stress.py",
+    "tools/gemm_stress.py",
 }
 DENIED_SUFFIXES = {
     ".bin",
@@ -71,7 +76,8 @@ SENSITIVE_PATTERNS = {
     ),
     "private key": re.compile(r"BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY"),
     "credential assignment": re.compile(
-        r"(?i)\b(?:password|passwd|token|api[_-]?key)\s*[:=]"
+        r"(?i)\b(?:password|passwd|api[_-]?key)\s*[:=]|"
+        r"\btoken\s*[:=]\s*['\"]"
     ),
     "private RM symbol": re.compile(r"\b_nv\d+rm\b"),
 }

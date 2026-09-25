@@ -5,9 +5,11 @@ narrowly validated NVIDIA CMP 100-210 target. It covers Tensor enablement,
 PCIe Gen2 retraining, headless NVML telemetry and control, terminal monitoring,
 and optional legacy-CUPTI metrics for llama.cpp.
 
-The procedures do not flash a VBIOS or program eFuses; reset or power loss
-restores stock state. Write-capable procedures are not claimed portable beyond
-the exact hardware and software gates below. See [Disclosure boundary](DISCLOSURE.md).
+The supported Tensor, Gen2 and HBM procedures do not flash a VBIOS or program
+eFuses; reset or power loss restores their stock state. Separate x16 research
+involved persistent SPI edits and did **not** produce a usable GPU. Write-capable
+procedures are not claimed portable beyond the exact hardware and software
+gates below. See [Disclosure boundary](DISCLOSURE.md).
 
 ## Hardware compatibility
 
@@ -50,22 +52,29 @@ for a device change. Use the exact tested baseline stated in each guide.
 | FP16 Tensor path | **Working** | Two CMP100-210 GPUs reached median results of 74.179 and 75.040 TFLOPS on an `8192 x 8192` FP16 GEMM |
 | PCIe Gen2 | **Working** | Both endpoints negotiated Gen2 x1; pinned 32 MiB transfers were approximately 417/419 MB/s versus a 207/209 MB/s stock-control measurement |
 | PCIe Gen3 | **Most probably HW fused** | No change can be applied , everything gets reverted to g2 , probably a fuse on the chip. |
-| PCIe width | **Help needed** | with a bios modification both card can achieve x16 (with added cap) but driver will not load refusing the gpu , also denuvo refuses |
+| PCIe width | **Unresolved** | Two tested IFR edits on one `1d84` card with added lane capacitors trained Gen1 x16; NVIDIA did not initialize it. No x16 CUDA result. See the negative-result report below. |
 | NVML telemetry and HBM control | **Working on the tested baseline** | Custom rust binary to read telemetry and write offset to clock and stuff |
 
-All published interventions are volatile. Resetting or power-cycling restores
-the stock state, except the x16 mod it doesnt work and i need help to get to the next stage, so that is not released.
+The supported Tensor, Gen2 and HBM interventions are volatile. The x16
+experiments were persistent flash edits and are reported as negative results,
+not as a working or supported unlock.
 
 ## Evidence
 
 - [Tensor result and benchmark parameters](docs/TENSOR-RESULTS.md)
 - [PCIe Gen2 and width measurements](docs/PCIE-RESULTS.md)
+- [CMP100 `1d84` x16 experiments: physical link achieved, GPU init failed](docs/PCIE-X16-1D84-NEGATIVE-2026-09-25.md)
 - [Gen3 negative result](docs/GEN3-LIMIT.md)
 - [NVML telemetry, headless clocks, and gpumon](docs/NVML-TELEMETRY-AND-CLOCKS.md)
 - [Live CUPTI metrics and reproducible Unsloth patch](docs/LLAMA-CUPTI-LIVE-METRICS.md)
 - [Test methodology and limitations](docs/METHODOLOGY.md)
 - [Captured Tensor benchmark output](results/tensor-benchmark.txt)
 - [Evidence checksums](results/SHA256SUMS)
+
+Researchers interested in continuing the unresolved `1d84` x16 investigation
+can [contact the maintainer privately](SECURITY.md) to discuss access to the
+private research repository. The public x16 report explains what was tested
+and what remains unknown.
 
 ## Validated software baseline
 

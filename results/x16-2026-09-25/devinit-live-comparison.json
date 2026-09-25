@@ -1,0 +1,710 @@
+{
+  "scope": "post-failure target versus initialized control; not a runtime execution trace",
+  "registers_read_per_card": 31,
+  "raw_register_differences": [
+    {
+      "address": "0x001584",
+      "target": "0x00000000",
+      "control": "0x00000080"
+    },
+    {
+      "address": "0x00E800",
+      "target": "0x02000010",
+      "control": "0x02020015"
+    },
+    {
+      "address": "0x00E820",
+      "target": "0x02000010",
+      "control": "0x02020015"
+    },
+    {
+      "address": "0x0205E4",
+      "target": "0x00000001",
+      "control": "0x00000009"
+    },
+    {
+      "address": "0x021288",
+      "target": "0x00000092",
+      "control": "0x00000093"
+    },
+    {
+      "address": "0x02240C",
+      "target": "0x00000000",
+      "control": "0x00000002"
+    },
+    {
+      "address": "0x088088",
+      "target": "0x11010042",
+      "control": "0x10110142"
+    },
+    {
+      "address": "0x08C040",
+      "target": "0x80005800",
+      "control": "0x08785800"
+    },
+    {
+      "address": "0x118B9C",
+      "target": "0x800009A0",
+      "control": "0x8000099A"
+    },
+    {
+      "address": "0x120064",
+      "target": "0x00000180",
+      "control": "0x00000CDD"
+    },
+    {
+      "address": "0x90BC10",
+      "target": "0xBADF3000",
+      "control": "0x80242424"
+    },
+    {
+      "address": "0x90BC90",
+      "target": "0xBADF3000",
+      "control": "0x00000029"
+    },
+    {
+      "address": "0x91BC10",
+      "target": "0xBADF3000",
+      "control": "0x80242424"
+    },
+    {
+      "address": "0x91BC90",
+      "target": "0xBADF3000",
+      "control": "0x00000029"
+    },
+    {
+      "address": "0x92BC10",
+      "target": "0xBADF3000",
+      "control": "0x80242424"
+    },
+    {
+      "address": "0x92BC90",
+      "target": "0xBADF3000",
+      "control": "0x00000029"
+    },
+    {
+      "address": "0x93BC10",
+      "target": "0xBADF3000",
+      "control": "0x80242424"
+    },
+    {
+      "address": "0x93BC90",
+      "target": "0xBADF3000",
+      "control": "0x00000029"
+    }
+  ],
+  "ordinary_predicates": [
+    {
+      "index": 9,
+      "address": "0x02240C",
+      "mask": "0x00000001",
+      "expected": "0x00000000",
+      "target_value": "0x00000000",
+      "control_value": "0x00000002",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 19,
+      "address": "0x0205E4",
+      "mask": "0x00000004",
+      "expected": "0x00000004",
+      "target_value": "0x00000001",
+      "control_value": "0x00000009",
+      "target_truth": false,
+      "control_truth": false,
+      "truth_differs": false
+    },
+    {
+      "index": 20,
+      "address": "0x0205E4",
+      "mask": "0x00000004",
+      "expected": "0x00000000",
+      "target_value": "0x00000001",
+      "control_value": "0x00000009",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 21,
+      "address": "0x021290",
+      "mask": "0x00000001",
+      "expected": "0x00000000",
+      "target_value": "0x00000001",
+      "control_value": "0x00000001",
+      "target_truth": false,
+      "control_truth": false,
+      "truth_differs": false
+    },
+    {
+      "index": 22,
+      "address": "0x021288",
+      "mask": "0x000000FF",
+      "expected": "0x00000000",
+      "target_value": "0x00000092",
+      "control_value": "0x00000093",
+      "target_truth": false,
+      "control_truth": false,
+      "truth_differs": false
+    },
+    {
+      "index": 24,
+      "address": "0x088088",
+      "mask": "0x000F0000",
+      "expected": "0x00010000",
+      "target_value": "0x11010042",
+      "control_value": "0x10110142",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 25,
+      "address": "0x08C040",
+      "mask": "0x000C0000",
+      "expected": "0x00080000",
+      "target_value": "0x80005800",
+      "control_value": "0x08785800",
+      "target_truth": false,
+      "control_truth": true,
+      "truth_differs": true
+    },
+    {
+      "index": 28,
+      "address": "0x118C50",
+      "mask": "0x08000000",
+      "expected": "0x08000000",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": false,
+      "control_truth": false,
+      "truth_differs": false
+    },
+    {
+      "index": 35,
+      "address": "0x120064",
+      "mask": "0x00000040",
+      "expected": "0x00000040",
+      "target_value": "0x00000180",
+      "control_value": "0x00000CDD",
+      "target_truth": false,
+      "control_truth": true,
+      "truth_differs": true
+    },
+    {
+      "index": 38,
+      "address": "0x001584",
+      "mask": "0x00000004",
+      "expected": "0x00000000",
+      "target_value": "0x00000000",
+      "control_value": "0x00000080",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 39,
+      "address": "0x001584",
+      "mask": "0x00000008",
+      "expected": "0x00000008",
+      "target_value": "0x00000000",
+      "control_value": "0x00000080",
+      "target_truth": false,
+      "control_truth": false,
+      "truth_differs": false
+    },
+    {
+      "index": 40,
+      "address": "0x021228",
+      "mask": "0x00000001",
+      "expected": "0x00000001",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": false,
+      "control_truth": false,
+      "truth_differs": false
+    },
+    {
+      "index": 41,
+      "address": "0x088000",
+      "mask": "0x0000FFFF",
+      "expected": "0x00008086",
+      "target_value": "0x1D8410DE",
+      "control_value": "0x1D8410DE",
+      "target_truth": false,
+      "control_truth": false,
+      "truth_differs": false
+    },
+    {
+      "index": 42,
+      "address": "0x00158C",
+      "mask": "0x00000001",
+      "expected": "0x00000001",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": false,
+      "control_truth": false,
+      "truth_differs": false
+    },
+    {
+      "index": 43,
+      "address": "0x0205E4",
+      "mask": "0x0000007C",
+      "expected": "0x00000000",
+      "target_value": "0x00000001",
+      "control_value": "0x00000009",
+      "target_truth": true,
+      "control_truth": false,
+      "truth_differs": true
+    },
+    {
+      "index": 44,
+      "address": "0x0015B4",
+      "mask": "0xFFFFFFFF",
+      "expected": "0x00000000",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 56,
+      "address": "0x021C18",
+      "mask": "0x00000001",
+      "expected": "0x00000000",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 57,
+      "address": "0x021C18",
+      "mask": "0x00000002",
+      "expected": "0x00000000",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 58,
+      "address": "0x021C18",
+      "mask": "0x00000004",
+      "expected": "0x00000000",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 59,
+      "address": "0x021C18",
+      "mask": "0x00000008",
+      "expected": "0x00000000",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 60,
+      "address": "0x021C18",
+      "mask": "0x00000010",
+      "expected": "0x00000000",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 61,
+      "address": "0x021C18",
+      "mask": "0x00000020",
+      "expected": "0x00000000",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 62,
+      "address": "0x021C18",
+      "mask": "0x00000040",
+      "expected": "0x00000000",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 63,
+      "address": "0x021C18",
+      "mask": "0x00000080",
+      "expected": "0x00000000",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 64,
+      "address": "0x021C18",
+      "mask": "0x00000100",
+      "expected": "0x00000000",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 65,
+      "address": "0x021C18",
+      "mask": "0x00000200",
+      "expected": "0x00000000",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 66,
+      "address": "0x021C18",
+      "mask": "0x00000400",
+      "expected": "0x00000000",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 67,
+      "address": "0x021C18",
+      "mask": "0x00000800",
+      "expected": "0x00000000",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 68,
+      "address": "0x021C18",
+      "mask": "0x00001000",
+      "expected": "0x00000000",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 69,
+      "address": "0x021C18",
+      "mask": "0x00002000",
+      "expected": "0x00000000",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 70,
+      "address": "0x021C18",
+      "mask": "0x00004000",
+      "expected": "0x00000000",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 71,
+      "address": "0x021C18",
+      "mask": "0x00008000",
+      "expected": "0x00000000",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 72,
+      "address": "0x118B9C",
+      "mask": "0x80000000",
+      "expected": "0x00000000",
+      "target_value": "0x800009A0",
+      "control_value": "0x8000099A",
+      "target_truth": false,
+      "control_truth": false,
+      "truth_differs": false
+    },
+    {
+      "index": 73,
+      "address": "0x021110",
+      "mask": "0x00000001",
+      "expected": "0x00000000",
+      "target_value": "0x00000001",
+      "control_value": "0x00000001",
+      "target_truth": false,
+      "control_truth": false,
+      "truth_differs": false
+    },
+    {
+      "index": 74,
+      "address": "0x021D38",
+      "mask": "0x00000001",
+      "expected": "0x00000000",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 75,
+      "address": "0x021D38",
+      "mask": "0x00000002",
+      "expected": "0x00000000",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 76,
+      "address": "0x021D38",
+      "mask": "0x00000004",
+      "expected": "0x00000000",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 77,
+      "address": "0x021D38",
+      "mask": "0x00000008",
+      "expected": "0x00000000",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 78,
+      "address": "0x021D38",
+      "mask": "0x00000010",
+      "expected": "0x00000000",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 79,
+      "address": "0x021D38",
+      "mask": "0x00000020",
+      "expected": "0x00000000",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 80,
+      "address": "0x021D38",
+      "mask": "0x00000040",
+      "expected": "0x00000000",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 81,
+      "address": "0x021D38",
+      "mask": "0x00000080",
+      "expected": "0x00000000",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 82,
+      "address": "0x021C18",
+      "mask": "0x0000FFFF",
+      "expected": "0x0000FFFF",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": false,
+      "control_truth": false,
+      "truth_differs": false
+    },
+    {
+      "index": 83,
+      "address": "0x001580",
+      "mask": "0x00000002",
+      "expected": "0x00000000",
+      "target_value": "0x00000000",
+      "control_value": "0x00000000",
+      "target_truth": true,
+      "control_truth": true,
+      "truth_differs": false
+    },
+    {
+      "index": 84,
+      "address": "0x0213EC",
+      "mask": "0x00000001",
+      "expected": "0x00000000",
+      "target_value": "0x00000001",
+      "control_value": "0x00000001",
+      "target_truth": false,
+      "control_truth": false,
+      "truth_differs": false
+    }
+  ],
+  "ordinary_truth_differences": [
+    {
+      "index": 25,
+      "address": "0x08C040",
+      "mask": "0x000C0000",
+      "expected": "0x00080000",
+      "target_value": "0x80005800",
+      "control_value": "0x08785800",
+      "target_truth": false,
+      "control_truth": true,
+      "truth_differs": true
+    },
+    {
+      "index": 35,
+      "address": "0x120064",
+      "mask": "0x00000040",
+      "expected": "0x00000040",
+      "target_value": "0x00000180",
+      "control_value": "0x00000CDD",
+      "target_truth": false,
+      "control_truth": true,
+      "truth_differs": true
+    },
+    {
+      "index": 43,
+      "address": "0x0205E4",
+      "mask": "0x0000007C",
+      "expected": "0x00000000",
+      "target_value": "0x00000001",
+      "control_value": "0x00000009",
+      "target_truth": true,
+      "control_truth": false,
+      "truth_differs": true
+    }
+  ],
+  "poll_predicates": [
+    {
+      "index": 45,
+      "address": "0x90BC90",
+      "mask": "0x00000020",
+      "expected": "0x00000020",
+      "target_value": "0xBADF3000",
+      "control_value": "0x00000029",
+      "target_truth": null,
+      "control_truth": true
+    },
+    {
+      "index": 46,
+      "address": "0x91BC90",
+      "mask": "0x00000020",
+      "expected": "0x00000020",
+      "target_value": "0xBADF3000",
+      "control_value": "0x00000029",
+      "target_truth": null,
+      "control_truth": true
+    },
+    {
+      "index": 47,
+      "address": "0x92BC90",
+      "mask": "0x00000020",
+      "expected": "0x00000020",
+      "target_value": "0xBADF3000",
+      "control_value": "0x00000029",
+      "target_truth": null,
+      "control_truth": true
+    },
+    {
+      "index": 48,
+      "address": "0x93BC90",
+      "mask": "0x00000020",
+      "expected": "0x00000020",
+      "target_value": "0xBADF3000",
+      "control_value": "0x00000029",
+      "target_truth": null,
+      "control_truth": true
+    },
+    {
+      "index": 49,
+      "address": "0x90BC10",
+      "mask": "0x80000000",
+      "expected": "0x80000000",
+      "target_value": "0xBADF3000",
+      "control_value": "0x80242424",
+      "target_truth": null,
+      "control_truth": true
+    },
+    {
+      "index": 50,
+      "address": "0x91BC10",
+      "mask": "0x80000000",
+      "expected": "0x80000000",
+      "target_value": "0xBADF3000",
+      "control_value": "0x80242424",
+      "target_truth": null,
+      "control_truth": true
+    },
+    {
+      "index": 51,
+      "address": "0x92BC10",
+      "mask": "0x80000000",
+      "expected": "0x80000000",
+      "target_value": "0xBADF3000",
+      "control_value": "0x80242424",
+      "target_truth": null,
+      "control_truth": true
+    },
+    {
+      "index": 52,
+      "address": "0x93BC10",
+      "mask": "0x80000000",
+      "expected": "0x80000000",
+      "target_value": "0xBADF3000",
+      "control_value": "0x80242424",
+      "target_truth": null,
+      "control_truth": true
+    }
+  ]
+}

@@ -23,3 +23,7 @@ Standard PCIe state can be collected with `tools/collect_state.sh`; that script
 performs no configuration writes. The write-capable guest helper, Proxmox
 coordinator and installation guides used for the published Gen2 procedure are
 included in this repository.
+
+The later [x16 experiments on `10de:1d84`](PCIE-X16-1D84-NEGATIVE-2026-09-25.md)
+are a separate, negative result: the PCIe link reached Gen1 x16 after board
+and IFR changes, but the GPU did not initialize under NVIDIA.

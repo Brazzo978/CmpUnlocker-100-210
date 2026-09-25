@@ -8,6 +8,8 @@ Allowed categories:
 
 - documentation written specifically for public disclosure;
 - sanitized standard-tool output;
+- reviewed, sanitized post-failure register comparisons that contain no
+  firmware bytes or machine identifiers;
 - screenshots that contain no hostnames, addresses or credentials;
 - read-only state collectors;
 - compute benchmarks;
