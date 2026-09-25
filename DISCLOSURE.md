@@ -31,6 +31,8 @@ separated from the broader private laboratory repository.
 - private infrastructure, access information and machine-specific mappings;
 - work-in-progress reverse-engineering material that has not had a fresh
   disclosure review.
+- the demonstrated `1d84` in-band SPI erase/program implementation and its
+  operational material; access is limited to a private research release.
 
 No NVIDIA firmware blob is stored here. Supported payloads are derived locally
 only after exact firmware-size and SHA-256 checks. The operational disclosure

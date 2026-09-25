@@ -59,6 +59,10 @@ The supported Tensor, Gen2 and HBM interventions are volatile. The x16
 experiments were persistent flash edits and are reported as negative results,
 not as a working or supported unlock.
 
+In-band SPI erase/program was demonstrated on one `1d84` card through our
+privileged-write vulnerability path. That capability's code is available only
+as a **private research release**, not in this public repository.
+
 ## Evidence
 
 - [Tensor result and benchmark parameters](docs/TENSOR-RESULTS.md)

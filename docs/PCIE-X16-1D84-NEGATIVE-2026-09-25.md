@@ -35,6 +35,14 @@ on the host remained usable; the modified GPU was absent from `nvidia-smi`.
 Our earlier [PCIe results](PCIE-RESULTS.md) and the
 [Gen3 investigation](GEN3-LIMIT.md) concern distinct questions.
 
+**Research capability and release scope:** On this one `10de:1d84` card, we
+demonstrated in-band SPI erase/program through our privileged-write
+vulnerability path: the complete image was read back three times and matched
+the intended edit. The code and operational material for that capability are
+available **only as a private research release**, shared directly with
+collaborators; they are not published in this repository. The demonstrated
+write capability must not be confused with a working x16 GPU unlock.
+
 ## Driver and register observations
 
 One target-only Nouveau bind identified GV100 and BIOS `88.00.9d.00.00`,
