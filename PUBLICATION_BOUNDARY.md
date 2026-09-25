@@ -14,6 +14,9 @@ Allowed categories:
 - read-only state collectors;
 - compute benchmarks;
 - evidence checksums.
+- reviewed public summaries of every research campaign, including negative
+  results, privilege capabilities, source analysis and attributed outside tests;
+- reviewed, non-mutating offline analysis code and read-only observers;
 - reviewed source and scripts required by the supported Tensor/Gen2 release
   and the bounded, volatile V100-like HBM clock procedure;
 - the reviewed CUPTI capability probe, pinned source patch and reproduction
@@ -24,8 +27,9 @@ Allowed categories:
 Forbidden categories:
 
 - prebuilt firmware, ROM, microcode, kernel modules or other payload binaries;
-- experimental write/retrain tools outside the reviewed Tensor/Gen2 path;
-- Gen3 driver hooks, private-symbol offsets and unpublished bypass chains;
+- experimental write-capable or disruption-capable probes outside the reviewed
+  supported Tensor/Gen2/HBM path, including flash program/erase and broad
+  privilege-targeting builders;
 - private infrastructure identifiers, credentials or access instructions;
 - files copied wholesale from the private repository without a fresh review.
 

@@ -1,8 +1,8 @@
 # Disclosure boundary
 
-This public repository contains the reviewed, minimum operational path needed
-to reproduce the Tensor and PCIe Gen2 results. It remains deliberately
-separated from the broader private laboratory repository.
+This public repository contains the reviewed operational Tensor/Gen2/HBM path
+and the findings of the broader `1d84` investigation. The private laboratory
+repository retains dangerous experimental writers and sensitive raw artifacts.
 
 ## Published
 
@@ -20,17 +20,19 @@ separated from the broader private laboratory repository.
 - the non-mutating CUPTI capability probe and pinned optional `llama-server`
   instrumentation patch, without NVIDIA libraries or prebuilt llama binaries;
 - hashes of the published evidence.
+- capability and negative-result reports for topology/SM, Gen3, x16,
+  ACR/PLM, Falcon, InfoROM, SPI and P2P, with their evidence boundaries;
+- reviewed non-mutating analysis tools.
 
 ## Still withheld
 
-- unpublished raw logs containing implementation-specific call paths;
+- raw logs containing machine identities or unreviewed sensitive content;
 - firmware, VBIOS, ROM and prebuilt kernel-module binaries;
-- experimental Gen3 driver interception and unpublished offsets;
-- broad diagnostic and retrain-hammer tooling not required by the supported
-  Tensor or Gen2 path;
+- experimental driver interception, retrain-hammer and flash tools that can
+  mutate or wedge a GPU;
 - private infrastructure, access information and machine-specific mappings;
-- work-in-progress reverse-engineering material that has not had a fresh
-  disclosure review.
+- private inputs, proprietary dumps and work-in-progress material that has
+  not had a fresh disclosure review.
 - the demonstrated `1d84` in-band SPI erase/program implementation and its
   operational material; access is limited to a private research release.
 

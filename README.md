@@ -3,7 +3,8 @@
 This repository provides experimental, volatile and fail-closed tooling for a
 narrowly validated NVIDIA CMP 100-210 target. It covers Tensor enablement,
 PCIe Gen2 retraining, headless NVML telemetry and control, terminal monitoring,
-and optional legacy-CUPTI metrics for llama.cpp.
+and optional legacy-CUPTI metrics for llama.cpp. The public research reports
+also cover the failed and unresolved SM, Gen3, x16, firmware and P2P paths.
 
 The supported Tensor, Gen2 and HBM procedures do not flash a VBIOS or program
 eFuses; reset or power loss restores their stock state. Separate x16 research
@@ -51,9 +52,9 @@ for a device change. Use the exact tested baseline stated in each guide.
 | --- | --- | --- |
 | FP16 Tensor path | **Working** | Two CMP100-210 GPUs reached median results of 74.179 and 75.040 TFLOPS on an `8192 x 8192` FP16 GEMM |
 | PCIe Gen2 | **Working** | Both endpoints negotiated Gen2 x1; pinned 32 MiB transfers were approximately 417/419 MB/s versus a 207/209 MB/s stock-control measurement |
-| PCIe Gen3 | **Most probably HW fused** | No change can be applied , everything gets reverted to g2 , probably a fuse on the chip. |
+| PCIe Gen3 | **Not achieved** | The endpoint's Gen2-only capability image clamps a Gen3 target request back to Gen2; its origin has not been proven. |
 | PCIe width | **Unresolved** | Two tested IFR edits on one `1d84` card with added lane capacitors trained Gen1 x16; NVIDIA did not initialize it. No x16 CUDA result. See the negative-result report below. |
-| NVML telemetry and HBM control | **Working on the tested baseline** | Custom rust binary to read telemetry and write offset to clock and stuff |
+| NVML telemetry and HBM control | **Working on the tested baseline** | The tested raw offset 138 changed HBM from 810 to 877 MHz without Xorg. |
 
 The supported Tensor, Gen2 and HBM interventions are volatile. The x16
 experiments were persistent flash edits and are reported as negative results,
@@ -65,6 +66,13 @@ as a **private research release**, not in this public repository.
 
 ## Evidence
 
+- [Complete research status and capability matrix](docs/RESEARCH-STATUS-2026-09.md)
+- [Topology and SM investigations](docs/TOPOLOGY-AND-SM-RESEARCH.md)
+- [Gen3 and PCIe width investigation](docs/PCIE-GEN3-AND-WIDTH-RESEARCH.md)
+- [ACR, PLM, Falcon, InfoROM and SPI findings](docs/FIRMWARE-AND-PRIVILEGE-RESEARCH.md)
+- [CMP-to-CMP P2P status](docs/P2P-RESEARCH-STATUS.md)
+- [Variant claims and external evidence](docs/VARIANTS-AND-EXTERNAL-EVIDENCE.md)
+- [Published read-only research tools](docs/READ-ONLY-RESEARCH-TOOLS.md)
 - [Tensor result and benchmark parameters](docs/TENSOR-RESULTS.md)
 - [PCIe Gen2 and width measurements](docs/PCIE-RESULTS.md)
 - [CMP100 `1d84` x16 experiments: physical link achieved, GPU init failed](docs/PCIE-X16-1D84-NEGATIVE-2026-09-25.md)

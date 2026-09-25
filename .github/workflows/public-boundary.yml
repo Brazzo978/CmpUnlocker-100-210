@@ -16,3 +16,5 @@ jobs:
         with:
           python-version: "3.12"
       - run: python3 tools/check_public_boundary.py
+      - run: python3 -m unittest discover -s tools -p 'test_*.py'
+      - run: python3 -m unittest discover -s tests -p 'test_*.py'

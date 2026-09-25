@@ -1,6 +1,6 @@
 # PCIe Gen3 negative result
 
-## Conclusion (99% fused)
+## Conclusion: endpoint capability gate observed
 
 PCIe Gen3 was not achieved through the tested volatile software-policy changes.
 The endpoint continued to expose a maximum link speed of 5 GT/s (Gen2), and its

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reject files outside the reviewed public Tensor/Gen2 release boundary."""
+"""Reject files outside the reviewed public research/release boundary."""
 
 from __future__ import annotations
 
@@ -32,6 +32,13 @@ APPROVED_FILES = {
     "docs/GEN3-LIMIT.md",
     "docs/GEMM-STRESS.md",
     "docs/PCIE-X16-1D84-NEGATIVE-2026-09-25.md",
+    "docs/RESEARCH-STATUS-2026-09.md",
+    "docs/TOPOLOGY-AND-SM-RESEARCH.md",
+    "docs/PCIE-GEN3-AND-WIDTH-RESEARCH.md",
+    "docs/FIRMWARE-AND-PRIVILEGE-RESEARCH.md",
+    "docs/P2P-RESEARCH-STATUS.md",
+    "docs/VARIANTS-AND-EXTERNAL-EVIDENCE.md",
+    "docs/READ-ONLY-RESEARCH-TOOLS.md",
     "docs/METHODOLOGY.md",
     "docs/PCIE-RESULTS.md",
     "docs/TENSOR-RESULTS.md",
@@ -53,6 +60,26 @@ APPROVED_FILES = {
     "systemd/cmp100-hbm-877.service",
     "systemd/cmp100-tensor-unlock.service",
     "tools/benchmark_tensor.py",
+    "tools/analyze_inforom.py",
+    "tools/decode_gv100_top.py",
+    "tools/test_decode_gv100_top.py",
+    "tools/analyze_pmu_readability_probe.py",
+    "tools/test_analyze_pmu_readability_probe.py",
+    "tools/cmp100-sm-topology-readonly.py",
+    "tools/audit_devinit_conditions.py",
+    "tools/analyze_devinit_gpc_copy.py",
+    "tools/analyze_gr_register_packs.py",
+    "tools/analyze_devinit_tpc_path.py",
+    "tools/analyze_devinit_width_path.py",
+    "tools/analyze_v100_tpc_request.py",
+    "tools/analyze_topology_stages.py",
+    "tools/analyze_gv100_plm_baseline.py",
+    "tools/decode_gv100_stages.py",
+    "tools/inventory_gr_mmio_calls.py",
+    "tools/compare_gv100_init_firmware.py",
+    "tools/test_decode_gv100_stages.py",
+    "tools/test_v100_tpc_request.py",
+    "tools/test_inventory_gr_mmio_calls.py",
     "tools/build_payloads.py",
     "tools/check_public_boundary.py",
     "tools/collect_state.sh",
