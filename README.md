@@ -72,9 +72,9 @@ not as a working or supported unlock.
 - [Evidence checksums](results/SHA256SUMS)
 
 Researchers interested in continuing the unresolved `1d84` x16 investigation
-can [contact the maintainer privately](SECURITY.md) to discuss access to the
-private research repository. The public x16 report explains what was tested
-and what remains unknown.
+can [contact me privately](SECURITY.md); I can share access to the private
+research repository with interested collaborators. The public x16 report
+explains what was tested and what remains unknown.
 
 ## Validated software baseline
 

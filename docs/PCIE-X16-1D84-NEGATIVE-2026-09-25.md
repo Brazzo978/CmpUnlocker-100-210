@@ -88,8 +88,8 @@ different SKU (`1df4`) and is not a demonstrated `1d84` x16 solution.
 ## Continue the investigation
 
 If you want to help investigate why the `1d84` card trains x16 but fails GPU
-initialization, please contact the maintainer privately using the route in
-[SECURITY.md](../SECURITY.md). The maintainer can discuss access to the
-private research repository, which contains the fuller test history and
-artifacts. Please do not post firmware images, card identifiers, private logs
-or new privileged-write details in a public issue.
+initialization, please contact me privately using the route in
+[SECURITY.md](../SECURITY.md). I can share access to the private research
+repository with interested collaborators; it contains the fuller test history
+and artifacts. Please do not post firmware images, card identifiers, private
+logs or new privileged-write details in a public issue.
