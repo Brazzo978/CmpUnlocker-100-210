@@ -37,6 +37,14 @@ driver_of() {
     link=$(readlink "/sys/bus/pci/devices/$1/driver" 2>/dev/null || true)
     printf '%s' "${link##*/}"
 }
+pin_awake() {
+    # PCI runtime PM suspends an unbound GPU within milliseconds when
+    # power/control=auto, after which MMIO reads back 0xFFFFFFFF.
+    # Pin the device awake (and resume it if needed) before touching BARs.
+    echo on > "/sys/bus/pci/devices/$1/power/control" || die "$1 cannot set power/control=on"
+    [[ $(<"/sys/bus/pci/devices/$1/power/control") == on ]] || die "$1 power/control did not stay on"
+    sleep 0.5
+}
 wait_nvidia_bdf() {
     local bdf_short=${1#0000:}
     local inventory
@@ -143,10 +151,19 @@ fi
 systemctl stop nvidia-persistenced 2>/dev/null || true
 for module in nvidia_uvm nvidia_drm nvidia_modeset; do
     if grep -q "^${module} " /proc/modules; then
-        modprobe -r "$module" || die "cannot unload $module; stop GPU clients first"
+        # rmmod removes exactly this module; modprobe -r would also take down
+        # the base nvidia module once its last dependent is gone.
+        rmmod "$module" || die "cannot unload $module; stop GPU clients first"
     fi
 done
-modprobe nouveau
+[[ -d /sys/module/nvidia ]] || die 'base nvidia module is not loaded after helper unload; refusing to continue'
+for bdf in "${TARGETS[@]}"; do
+    [[ $(driver_of "$bdf") == nvidia ]] || die "$bdf is not bound to nvidia after helper unload"
+done
+if ! modprobe nouveau 2>/dev/null; then
+    say 'modprobe nouveau is blacklisted in modprobe.d; retrying with an empty config'
+    modprobe -C /dev/null nouveau || die 'cannot load nouveau even with an empty modprobe config'
+fi
 
 unlock_one() {
     local bdf=$1 bus_hex bus_dec devdir bar0 tensor_phys baseline
@@ -162,6 +179,7 @@ unlock_one() {
     say "$bdf: unbind NVIDIA"
     printf 'test-hold' > "$devdir/driver_override"
     printf '%s' "$bdf" > /sys/bus/pci/drivers/nvidia/unbind
+    pin_awake "$bdf"
     baseline=$(busybox devmem "$tensor_phys" 32)
     say "$bdf: Tensor baseline $baseline"
     if [[ $baseline == 0x00000888 ]]; then
@@ -204,6 +222,7 @@ unlock_one() {
     say "$bdf: clean Nouveau unload and NVIDIA handoff"
     printf 'test-hold' > "$devdir/driver_override"
     printf '%s' "$bdf" > /sys/bus/pci/drivers/nouveau/unbind
+    pin_awake "$bdf"
     [[ $(busybox devmem "$tensor_phys" 32) == 0x00000888 ]] || die "$bdf lost Tensor value before NVIDIA bind"
     printf 'nvidia' > "$devdir/driver_override"
     printf '%s' "$bdf" > /sys/bus/pci/drivers/nvidia/bind

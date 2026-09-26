@@ -46,6 +46,14 @@ driver_of() {
     link=$(readlink "/sys/bus/pci/devices/$1/driver" 2>/dev/null || true)
     printf '%s' "${link##*/}"
 }
+pin_awake() {
+    # PCI runtime PM suspends an unbound GPU within milliseconds when
+    # power/control=auto, after which MMIO reads back 0xFFFFFFFF.
+    # Pin the device awake (and resume it if needed) before touching BARs.
+    echo on > "/sys/bus/pci/devices/$1/power/control" || die "$1 cannot set power/control=on"
+    [[ $(<"/sys/bus/pci/devices/$1/power/control") == on ]] || die "$1 power/control did not stay on"
+    sleep 0.5
+}
 assert_root_regular() {
     local path=$1 mode
     [[ -f $path && ! -L $path ]] || die "not a regular file: $path"
@@ -355,7 +363,9 @@ for module in nvidia_uvm nvidia_drm nvidia_modeset; do
         INITIALLY_LOADED_MODULES+=("$module")
         # Allow transient users to finish; never force removal or kill clients.
         for attempt in $(seq 1 10); do
-            if modprobe -r "$module" 2>/dev/null; then
+            # rmmod removes exactly this module; modprobe -r would also take
+            # down the base nvidia module once its last dependent is gone.
+            if rmmod "$module" 2>/dev/null; then
                 break
             fi
             sleep 1
@@ -366,7 +376,14 @@ for module in nvidia_uvm nvidia_drm nvidia_modeset; do
         fi
     fi
 done
-modprobe nouveau
+[[ -d /sys/module/nvidia ]] || die 'base nvidia module is not loaded after helper unload; refusing to continue'
+for bdf in "${TARGETS[@]}"; do
+    [[ $(driver_of "$bdf") == nvidia ]] || die "$bdf is not bound to nvidia after helper unload"
+done
+if ! modprobe nouveau 2>/dev/null; then
+    say 'modprobe nouveau is blacklisted in modprobe.d; retrying with an empty config'
+    modprobe -C /dev/null nouveau || die 'cannot load nouveau even with an empty modprobe config'
+fi
 
 BACKUP_DIR=$(mktemp -d /run/cmp100-pcie.XXXXXX)
 install -m 0600 "$ACTIVE_FECS" "$BACKUP_DIR/fecs_sig.bin"
@@ -385,6 +402,7 @@ apply_signed_write() {
     printf 'test-hold' > "$devdir/driver_override"
     printf '%s' "$bdf" > /sys/bus/pci/drivers/nvidia/unbind
     [[ -z $(driver_of "$bdf") ]] || die "$bdf did not unbind from nvidia"
+    pin_awake "$bdf"
     tensor=$(mmio_read "$(mmio_at "$bdf" 0x409664)")
     (( tensor == 0x888 )) || die "$bdf Tensor prerequisite is not unlocked"
 
@@ -410,6 +428,7 @@ apply_signed_write() {
     printf 'test-hold' > "$devdir/driver_override"
     printf '%s' "$bdf" > /sys/bus/pci/drivers/nouveau/unbind
     [[ -z $(driver_of "$bdf") ]] || die "$bdf did not unbind Nouveau after $label"
+    pin_awake "$bdf"
     if [[ $payload == "$PCIE_POLICY" ]]; then
         actual=$(mmio_read "$(mmio_at "$bdf" 0x88610)")
         (( actual == 1 )) || die "$bdf signed policy readback mismatch"
@@ -438,6 +457,7 @@ retrain_one() {
     printf 'test-hold' > "$devdir/driver_override"
     printf '%s' "$bdf" > /sys/bus/pci/drivers/nvidia/unbind
     [[ -z $(driver_of "$bdf") ]] || die "$bdf did not unbind from NVIDIA before retrain"
+    pin_awake "$bdf"
     target=$(mmio_read "$(mmio_at "$bdf" 0x880a8)")
     cap=$(mmio_read "$(mmio_at "$bdf" 0x88084)")
     (( (target & 15) == 2 && (cap & 15) >= 2 )) || die "$bdf Gen2 capability/target prerequisites failed"
